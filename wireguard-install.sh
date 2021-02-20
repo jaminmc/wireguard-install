@@ -37,8 +37,10 @@ function checkVirt() {
 			read -rp "Press enter to continue at your own risk, or CTRL-C to quit."
 			Container=1
 		else
-			echo "OpenVZ is not supported"
-			exit 1
+			echo "OpenVZ is not supported with kernel modules inside the container."
+			echo "Continuing in container mode and will use userspace AmneziaWG (amneziawg-go)."
+			read -rp "Press enter to continue at your own risk, or CTRL-C to quit."
+			Container=1
 		fi
 	fi
 	if [[ ${VIRT} == "lxc" ]]; then
@@ -53,10 +55,69 @@ function checkVirt() {
 			read -rp "Press enter to continue at your own risk, or CTRL-C to quit."
 			Container=1
 		else
-			echo "Your LXC host does not have the WireGuard Kernel Module."
-			echo "If you have access to the host, try installing wireguard-dkms on it."
-			exit 1
+			echo "Your LXC environment does not have the WireGuard kernel module available."
+			echo "Continuing in container mode and will use userspace AmneziaWG (amneziawg-go)."
+			read -rp "Press enter to continue at your own risk, or CTRL-C to quit."
+			Container=1
 		fi
+	fi
+}
+
+function installAmneziaWGGo() {
+	# Build/install amneziawg-go in a portable way
+	# (preferred over downloading binaries so it works on all supported distros)
+	if command -v amneziawg-go &>/dev/null; then
+		return 0
+	fi
+
+	if ! command -v go &>/dev/null; then
+		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
+			apt-get update
+			installPackages apt-get install -y --no-install-recommends golang
+		elif [[ ${OS} == 'fedora' ]]; then
+			installPackages dnf install -y golang
+		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]] || [[ ${OS} == 'oracle' ]]; then
+			installPackages yum install -y golang || installPackages dnf install -y golang
+		elif [[ ${OS} == 'arch' ]]; then
+			installPackages pacman -S --needed --noconfirm go
+		elif [[ ${OS} == 'alpine' ]]; then
+			apk update
+			installPackages apk add go
+		fi
+	fi
+
+	if ! command -v go &>/dev/null; then
+		echo -e "${RED}Failed to install Go toolchain required for amneziawg-go.${NC}"
+		exit 1
+	fi
+
+	# Install the latest amneziawg-go (userspace implementation)
+	# Repo: https://github.com/amnezia-vpn/amneziawg-go
+	installPackages env GOBIN=/usr/local/bin GO111MODULE=on go install github.com/amnezia-vpn/amneziawg-go@latest
+
+	if ! command -v amneziawg-go &>/dev/null; then
+		echo -e "${RED}amneziawg-go installation failed. The 'amneziawg-go' command was not found.${NC}"
+		exit 1
+	fi
+}
+
+function installAmneziaWGKernel() {
+	# Best-effort DKMS install for bare metal/VMs.
+	# Package availability depends on distro/repositories.
+	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
+		apt-get update
+		installPackages apt-get install -y iptables resolvconf qrencode
+		installPackages apt-get install -y amneziawg-dkms amneziawg-tools
+	elif [[ ${OS} == 'fedora' ]]; then
+		installPackages dnf install -y amneziawg-dkms amneziawg-tools iptables qrencode
+	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]] || [[ ${OS} == 'oracle' ]]; then
+		installPackages yum install -y amneziawg-dkms amneziawg-tools iptables qrencode || true
+		installPackages dnf install -y amneziawg-dkms amneziawg-tools iptables qrencode || true
+	elif [[ ${OS} == 'arch' ]]; then
+		installPackages pacman -S --needed --noconfirm amneziawg-dkms amneziawg-tools iptables qrencode
+	elif [[ ${OS} == 'alpine' ]]; then
+		apk update
+		installPackages apk add amneziawg-tools iptables libqrencode-tools
 	fi
 }
 
@@ -206,14 +267,21 @@ function installWireGuard() {
 	# Run setup questions first
 	installQuestions
 
-	# Install WireGuard tools and module
+	# Install AmneziaWG (preferred) / tools
+	#
+	# - Bare metal / VM: install kernel module via DKMS (amneziawg-dkms) + tools
+	# - Container: install userspace amneziawg-go + wireguard-tools (wg/wg-quick)
 	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' && ${VERSION_ID} -gt 10 ]]; then
 		apt-get update
+		installPackages apt-get install -y iptables resolvconf qrencode
 		if [[ ${Container} == 1 ]]; then
-			installPackages apt-get install -y --no-install-recommends wireguard-tools
-			installPackages apt-get install -y iptables resolvconf qrencode
+			# Prefer amneziawg-tools if available (UAPI path differs from WireGuard-Go)
+			if ! apt-get install -y --no-install-recommends amneziawg-tools; then
+				installPackages apt-get install -y --no-install-recommends wireguard-tools
+			fi
+			installAmneziaWGGo
 		else
-			installPackages apt-get install -y wireguard iptables resolvconf qrencode
+			installAmneziaWGKernel
 		fi
 	elif [[ ${OS} == 'debian' ]]; then
 		if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
@@ -223,44 +291,63 @@ function installWireGuard() {
 		apt-get update
 		installPackages apt-get install -y iptables resolvconf qrencode
 		if [[ ${Container} == 1 ]]; then
-			installPackages apt-get install -y -t buster-backports --no-install-recommends wireguard-tools
+			if ! apt-get install -y -t buster-backports --no-install-recommends amneziawg-tools; then
+				installPackages apt-get install -y -t buster-backports --no-install-recommends wireguard-tools
+			fi
+			installAmneziaWGGo
 		else
-			installPackages apt-get install -y -t buster-backports wireguard
+			installAmneziaWGKernel
 		fi
 	elif [[ ${OS} == 'fedora' ]]; then
-		if [[ ${VERSION_ID} -lt 32 ]]; then
-			installPackages dnf install -y dnf-plugins-core
-			dnf copr enable -y jdoss/wireguard
-			if [[ ${Container} != 1 ]]; then
-				installPackages dnf install -y wireguard-dkms
-			fi
+		if [[ ${Container} == 1 ]]; then
+			installPackages dnf install -y wireguard-tools iptables qrencode || true
+			installPackages dnf install -y amneziawg-tools || true
+			installAmneziaWGGo
+		else
+			installAmneziaWGKernel
 		fi
-		installPackages dnf install -y wireguard-tools iptables qrencode
 	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
-		if [[ ${VERSION_ID} == 8* ]]; then
-			installPackages yum install -y epel-release elrepo-release
-			if [[ ${Container} != 1 ]]; then
-				installPackages yum install -y kmod-wireguard
-			fi
-			yum install -y qrencode || true # not available on release 9
+		if [[ ${Container} == 1 ]]; then
+			installPackages yum install -y wireguard-tools iptables || true
+			installPackages dnf install -y wireguard-tools iptables || true
+			installPackages yum install -y amneziawg-tools || true
+			installPackages dnf install -y amneziawg-tools || true
+			installPackages yum install -y qrencode || true
+			installPackages dnf install -y qrencode || true
+			installAmneziaWGGo
+		else
+			installAmneziaWGKernel
 		fi
-		installPackages yum install -y wireguard-tools iptables
 	elif [[ ${OS} == 'oracle' ]]; then
-		installPackages dnf install -y oraclelinux-developer-release-el8
-		dnf config-manager --disable -y ol8_developer
-		dnf config-manager --enable -y ol8_developer_UEKR6
-		dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'
-		installPackages dnf install -y wireguard-tools qrencode iptables
+		if [[ ${Container} == 1 ]]; then
+			installPackages dnf install -y wireguard-tools qrencode iptables || true
+			installPackages dnf install -y amneziawg-tools || true
+			installAmneziaWGGo
+		else
+			installAmneziaWGKernel
+		fi
 	elif [[ ${OS} == 'arch' ]]; then
-		installPackages pacman -S --needed --noconfirm wireguard-tools qrencode
+		if [[ ${Container} == 1 ]]; then
+			installPackages pacman -S --needed --noconfirm wireguard-tools qrencode
+			installPackages pacman -S --needed --noconfirm amneziawg-tools || true
+			installAmneziaWGGo
+		else
+			installAmneziaWGKernel
+		fi
 	elif [[ ${OS} == 'alpine' ]]; then
 		apk update
 		installPackages apk add wireguard-tools iptables libqrencode-tools
+		if [[ ${Container} == 1 ]]; then
+			installPackages apk add amneziawg-tools || true
+			installAmneziaWGGo
+		else
+			installAmneziaWGKernel
+		fi
 	fi
 
-	# Verify WireGuard installation
+	# Verify installation
 	if ! command -v wg &>/dev/null; then
-		echo -e "${RED}WireGuard installation failed. The 'wg' command was not found.${NC}"
+		echo -e "${RED}Installation failed. The 'wg' command was not found.${NC}"
 		echo "Please check the installation output above for errors."
 		exit 1
 	fi
@@ -269,6 +356,11 @@ function installWireGuard() {
 	mkdir /etc/wireguard >/dev/null 2>&1
 
 	chmod 600 -R /etc/wireguard/
+
+	# When running userspace AmneziaWG, ensure wg-quick uses it.
+	if [[ ${Container} == 1 ]] && command -v amneziawg-go &>/dev/null; then
+		export WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
+	fi
 
 	SERVER_PRIV_KEY=$(wg genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | wg pubkey)
@@ -329,9 +421,17 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 		rc-update add "wg-quick.${SERVER_WG_NIC}"
 	else
 		sysctl --system
-
-		systemctl start "wg-quick@${SERVER_WG_NIC}"
-		systemctl enable "wg-quick@${SERVER_WG_NIC}"
+		if [[ ${Container} == 1 ]]; then
+			# In container environments, systemd may not be available; bring it up directly.
+			# wg-quick will invoke the userspace implementation when set.
+			if command -v amneziawg-go &>/dev/null; then
+				export WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
+			fi
+			wg-quick up "${SERVER_WG_NIC}"
+		else
+			systemctl start "wg-quick@${SERVER_WG_NIC}"
+			systemctl enable "wg-quick@${SERVER_WG_NIC}"
+		fi
 	fi
 
 	newClient
