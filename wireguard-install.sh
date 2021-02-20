@@ -136,13 +136,12 @@ function installWireGuard() {
 	# Install WireGuard tools and module
 	if [[ ${OS} == 'ubuntu' ]]; then
 		apt-get update
+		apt-get install -y iptables resolvconf qrencode
 		if [[ $Container == 1 ]]; then
 			apt-get install -y wireguard-tools --no-install-recommends
-			apt-get install -y iptables resolvconf qrencode
 		else
-			apt-get install -y wireguard iptables resolvconf qrencode
+			apt-get install -y wireguard
 		fi
-
 	elif [[ ${OS} == 'debian' ]]; then
 		if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
 			echo "deb http://deb.debian.org/debian buster-backports main" >/etc/apt/sources.list.d/backports.list
