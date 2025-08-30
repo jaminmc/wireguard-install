@@ -106,6 +106,57 @@ is_non_routable() {
     return 1
 }
 
+is_valid_ip() {
+    local ip=$1
+    # Check if it's a valid IPv4 address
+    if [[ $ip =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; then
+        return 0
+    fi
+    # Check if it's a valid IPv6 address
+    if [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]] || \
+       [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,6}:[0-9a-fA-F]{0,4}$ ]] || \
+       [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,5}(:[0-9a-fA-F]{0,4}){1,2}$ ]] || \
+       [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,4}(:[0-9a-fA-F]{0,4}){1,3}$ ]] || \
+       [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,3}(:[0-9a-fA-F]{0,4}){1,4}$ ]] || \
+       [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,2}(:[0-9a-fA-F]{0,4}){1,5}$ ]] || \
+       [[ $ip =~ ^[0-9a-fA-F]{0,4}:(:[0-9a-fA-F]{0,4}){1,6}$ ]] || \
+       [[ $ip =~ ^:(:[0-9a-fA-F]{0,4}){1,7}$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+get_system_dns() {
+    local dns1=""
+    local dns2=""
+    
+    # Try to get DNS from resolv.conf
+    if [[ -f /etc/resolv.conf ]]; then
+        # Get first two nameserver entries
+        dns1=$(grep -E "^nameserver[[:space:]]+" /etc/resolv.conf | head -1 | awk '{print $2}')
+        dns2=$(grep -E "^nameserver[[:space:]]+" /etc/resolv.conf | head -2 | tail -1 | awk '{print $2}')
+    fi
+    
+    # If resolv.conf doesn't have valid IPs, try systemd-resolve
+    if [[ -z "$dns1" ]] || ! is_valid_ip "$dns1"; then
+        if command -v systemd-resolve &>/dev/null; then
+            dns1=$(systemd-resolve --status | grep -A 5 "DNS Servers:" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}' | head -1)
+            dns2=$(systemd-resolve --status | grep -A 5 "DNS Servers:" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}' | head -2 | tail -1)
+        fi
+    fi
+    
+    # If still no valid DNS, try network manager
+    if [[ -z "$dns1" ]] || ! is_valid_ip "$dns1"; then
+        if command -v nmcli &>/dev/null; then
+            dns1=$(nmcli dev show | grep DNS | head -1 | awk '{print $2}')
+            dns2=$(nmcli dev show | grep DNS | head -2 | tail -1 | awk '{print $2}')
+        fi
+    fi
+    
+    # Return the detected DNS servers
+    echo "$dns1 $dns2"
+}
+
 function checkOS() {
 	source /etc/os-release
 	OS="${ID}"
@@ -195,16 +246,19 @@ function installQuestions() {
 	
 	HAS_IPV4=false
 	HAS_IPV6=false
+	HAS_ROUTABLE_IPV4=false
 	IP_FAMILY=""
 	
-	# Check if IPv4 is available and public
+	# Check if IPv4 is available (both public and private)
 	if [[ -n ${SERVER_PUB_IP_V4} ]]; then
 		if is_non_routable "${SERVER_PUB_IP_V4}"; then
 			echo "Detected non-routable IPv4 address: ${SERVER_PUB_IP_V4}"
-			HAS_IPV4=false
+			HAS_IPV4=true  # Still has IPv4, just not routable
+			HAS_ROUTABLE_IPV4=false
 		else
 			echo "Detected public IPv4 address: ${SERVER_PUB_IP_V4}"
 			HAS_IPV4=true
+			HAS_ROUTABLE_IPV4=true
 		fi
 	fi
 	
@@ -215,18 +269,18 @@ function installQuestions() {
 	fi
 	
 	# Determine which IP to use as default
-	if [[ ${HAS_IPV4} == true && ${HAS_IPV6} == true ]]; then
+	if [[ ${HAS_ROUTABLE_IPV4} == true && ${HAS_IPV6} == true ]]; then
 		# Both available, prefer IPv4 for better compatibility
 		SERVER_PUB_IP="${SERVER_PUB_IP_V4}"
 		IP_FAMILY="ipv4"
 		echo "Using public IPv4 as default (IPv6 also available)"
-	elif [[ ${HAS_IPV4} == true ]]; then
-		# Only IPv4 available
+	elif [[ ${HAS_ROUTABLE_IPV4} == true ]]; then
+		# Only routable IPv4 available
 		SERVER_PUB_IP="${SERVER_PUB_IP_V4}"
 		IP_FAMILY="ipv4"
 		echo "Using public IPv4 as default"
 	elif [[ ${HAS_IPV6} == true ]]; then
-		# Only IPv6 available or IPv4 is private
+		# Only IPv6 available or IPv4 is non-routable
 		SERVER_PUB_IP="${SERVER_PUB_IP_V6}"
 		IP_FAMILY="ipv6"
 		if [[ -n ${SERVER_PUB_IP_V4} ]]; then
@@ -251,9 +305,11 @@ function installQuestions() {
 		echo ""
 		echo "Please enter your server's public IP address manually."
 		echo "You can find it by visiting: https://whatismyipaddress.com/"
-		echo ""
 	fi
-	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+	echo ""
+	until is_valid_ip "${SERVER_PUB_IP}"; do
+		read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+	done
 
 	# Detect public interfaces for both IPv4 and IPv6
 	SERVER_NIC_V4="$(ip -4 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
@@ -287,9 +343,9 @@ function installQuestions() {
 	DEFAULT_IPV4="10.${RANDOM_IPV4_SECOND}.${RANDOM_IPV4_THIRD}.1"
 	DEFAULT_IPV6="fd42:${RANDOM_IPV4_SECOND}:${RANDOM_IPV4_THIRD}::1"
 
-	# Only prompt for IPv4 if the server has public IPv4
+	# Only prompt for IPv4 if the server has IPv4
 	if [[ ${HAS_IPV4} == true ]]; then
-		until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
+		until is_valid_ip "${SERVER_WG_IPV4}" && [[ ${SERVER_WG_IPV4} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; do
 			read -rp "Server WireGuard IPv4: " -e -i "${DEFAULT_IPV4}" SERVER_WG_IPV4
 		done
 	else
@@ -298,7 +354,7 @@ function installQuestions() {
 
 	# Only prompt for IPv6 if the server has IPv6
 	if [[ ${HAS_IPV6} == true ]]; then
-		until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
+		until is_valid_ip "${SERVER_WG_IPV6}" && [[ ${SERVER_WG_IPV6} =~ .*:.* ]]; do
 			read -rp "Server WireGuard IPv6: " -e -i "${DEFAULT_IPV6}" SERVER_WG_IPV6
 		done
 	else
@@ -311,12 +367,51 @@ function installQuestions() {
 		read -rp "Server WireGuard port [1-65535]: " -e -i "${RANDOM_PORT}" SERVER_PORT
 	done
 
-	# Adguard DNS by default
-	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
+	# Detect system DNS servers
+	SYSTEM_DNS=$(get_system_dns)
+	SYSTEM_DNS_1=$(echo "$SYSTEM_DNS" | awk '{print $1}')
+	SYSTEM_DNS_2=$(echo "$SYSTEM_DNS" | awk '{print $2}')
+	
+	# Set DNS defaults based on available IP families and system DNS
+	if [[ ${HAS_IPV4} == true ]]; then
+		# Use system DNS if valid, otherwise fallback to Cloudflare
+		if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
+			DEFAULT_DNS_1="$SYSTEM_DNS_1"
+		else
+			DEFAULT_DNS_1="1.1.1.1"
+		fi
+		if [[ -n "$SYSTEM_DNS_2" ]] && is_valid_ip "$SYSTEM_DNS_2"; then
+			DEFAULT_DNS_2="$SYSTEM_DNS_2"
+		else
+			DEFAULT_DNS_2="1.0.0.1"
+		fi
+	else
+		# IPv6-only DNS servers
+		if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1" && [[ "$SYSTEM_DNS_1" =~ .*:.* ]]; then
+			DEFAULT_DNS_1="$SYSTEM_DNS_1"
+		else
+			DEFAULT_DNS_1="2606:4700:4700::1111"
+		fi
+		if [[ -n "$SYSTEM_DNS_2" ]] && is_valid_ip "$SYSTEM_DNS_2" && [[ "$SYSTEM_DNS_2" =~ .*:.* ]]; then
+			DEFAULT_DNS_2="$SYSTEM_DNS_2"
+		else
+			DEFAULT_DNS_2="2606:4700:4700::1001"
+		fi
+	fi
+	
+	# Show detected system DNS servers
+	if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
+		echo "Detected system DNS servers: $SYSTEM_DNS_1${SYSTEM_DNS_2:+ and $SYSTEM_DNS_2}"
+	else
+		echo "Using fallback DNS servers: $DEFAULT_DNS_1${DEFAULT_DNS_2:+ and $DEFAULT_DNS_2}"
+	fi
+	
+	# DNS configuration
+	until is_valid_ip "${CLIENT_DNS_1}"; do
+		read -rp "First DNS resolver to use for the clients: " -e -i "${DEFAULT_DNS_1}" CLIENT_DNS_1
 	done
-	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 1.0.0.1 CLIENT_DNS_2
+	until is_valid_ip "${CLIENT_DNS_2}"; do
+		read -rp "Second DNS resolver to use for the clients (optional): " -e -i "${DEFAULT_DNS_2}" CLIENT_DNS_2
 		if [[ ${CLIENT_DNS_2} == "" ]]; then
 			CLIENT_DNS_2="${CLIENT_DNS_1}"
 		fi
