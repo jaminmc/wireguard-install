@@ -26,7 +26,29 @@ function checkVirt() {
 		echo "but the kernel module has to be installed on the host,"
 		echo "the container has to be run with some specific parameters"
 		echo "and only the tools need to be installed in the container."
-		exit 1
+		echo ""
+		read -rp "Do you want to continue anyway? [y/n]: " -e CONTINUE_LXC
+		CONTINUE_LXC=${CONTINUE_LXC:-n}
+		if [[ $CONTINUE_LXC != 'y' && $CONTINUE_LXC != 'Y' ]]; then
+			exit 1
+		fi
+		echo "Continuing with LXC environment..."
+		
+		# Check if WireGuard kernel module is available
+		if lsmod | grep -q wireguard; then
+			echo "WireGuard kernel module is loaded and available."
+			LXC_HASWIREGUARD=true
+		elif [ -e "/sys/module/wireguard" ]; then
+			echo "WireGuard kernel module is available (built into kernel)."
+			LXC_HASWIREGUARD=true
+		elif [ -e "/lib/modules/$(uname -r)/kernel/net/wireguard/wireguard.ko" ] || [ -e "/lib/modules/$(uname -r)/kernel/net/wireguard/wireguard.ko.xz" ]; then
+			echo "WireGuard kernel module is available on disk."
+			LXC_HASWIREGUARD=true
+		else
+			echo "Warning: WireGuard kernel module is not available in this LXC container."
+			echo "The kernel module must be installed on the host system."
+			LXC_HASWIREGUARD=false
+		fi
 	}
 	if command -v virt-what &>/dev/null; then
 		if [ "$(virt-what)" == "openvz" ]; then
@@ -130,14 +152,43 @@ function installQuestions() {
 
 	# Detect public IPv4 or IPv6 address and pre-fill for the user
 	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
+	IP_FAMILY="ipv4"
+	HAS_IPV4=true
+	HAS_IPV6=false
+	
 	if [[ -z ${SERVER_PUB_IP} ]]; then
 		# Detect public IPv6 address
 		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
+		IP_FAMILY="ipv6"
+		HAS_IPV4=false
+		HAS_IPV6=true
+	else
+		# Check if IPv6 is also available
+		IPV6_TEST=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
+		if [[ -n ${IPV6_TEST} ]]; then
+			HAS_IPV6=true
+		fi
 	fi
 	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 
-	# Detect public interface and pre-fill for the user
-	SERVER_NIC="$(ip -4 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
+	# Detect public interfaces for both IPv4 and IPv6
+	SERVER_NIC_V4="$(ip -4 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
+	SERVER_NIC_V6="$(ip -6 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
+	
+	# Set the primary interface based on the detected IP family
+	if [[ ${IP_FAMILY} == "ipv4" ]]; then
+		SERVER_NIC="${SERVER_NIC_V4}"
+	else
+		SERVER_NIC="${SERVER_NIC_V6}"
+	fi
+	# Fallback: if no interface found for the detected IP family, use the other family's interface
+	if [[ -z "${SERVER_NIC}" ]]; then
+		if [[ ${IP_FAMILY} == "ipv4" ]]; then
+			SERVER_NIC="${SERVER_NIC_V6}"
+		else
+			SERVER_NIC="${SERVER_NIC_V4}"
+		fi
+	fi
 	until [[ ${SERVER_PUB_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
 		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
 	done
@@ -146,13 +197,29 @@ function installQuestions() {
 		read -rp "WireGuard interface name: " -e -i wg0 SERVER_WG_NIC
 	done
 
-	until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
-		read -rp "Server WireGuard IPv4: " -e -i 10.66.66.1 SERVER_WG_IPV4
-	done
+	# Generate random numbers for IPv4 and IPv6 addresses
+	RANDOM_IPV4_SECOND=$(shuf -i0-254 -n1)
+	RANDOM_IPV4_THIRD=$(shuf -i0-254 -n1)
+	DEFAULT_IPV4="10.${RANDOM_IPV4_SECOND}.${RANDOM_IPV4_THIRD}.1"
+	DEFAULT_IPV6="fd42:${RANDOM_IPV4_SECOND}:${RANDOM_IPV4_THIRD}::1"
 
-	until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
-		read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
-	done
+	# Only prompt for IPv4 if the server has IPv4
+	if [[ ${HAS_IPV4} == true ]]; then
+		until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
+			read -rp "Server WireGuard IPv4: " -e -i "${DEFAULT_IPV4}" SERVER_WG_IPV4
+		done
+	else
+		SERVER_WG_IPV4=""
+	fi
+
+	# Only prompt for IPv6 if the server has IPv6
+	if [[ ${HAS_IPV6} == true ]]; then
+		until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
+			read -rp "Server WireGuard IPv6: " -e -i "${DEFAULT_IPV6}" SERVER_WG_IPV6
+		done
+	else
+		SERVER_WG_IPV6=""
+	fi
 
 	# Generate random number within private ports range
 	RANDOM_PORT=$(shuf -i49152-65535 -n1)
@@ -171,11 +238,20 @@ function installQuestions() {
 		fi
 	done
 
+	# Set default ALLOWED_IPS based on available IP families
+	if [[ ${HAS_IPV4} == true && ${HAS_IPV6} == true ]]; then
+		DEFAULT_ALLOWED_IPS="0.0.0.0/0,::/0"
+	elif [[ ${HAS_IPV4} == true ]]; then
+		DEFAULT_ALLOWED_IPS="0.0.0.0/0"
+	else
+		DEFAULT_ALLOWED_IPS="::/0"
+	fi
+	
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
-		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i '0.0.0.0/0,::/0' ALLOWED_IPS
+		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i "${DEFAULT_ALLOWED_IPS}" ALLOWED_IPS
 		if [[ ${ALLOWED_IPS} == "" ]]; then
-			ALLOWED_IPS="0.0.0.0/0,::/0"
+			ALLOWED_IPS="${DEFAULT_ALLOWED_IPS}"
 		fi
 	done
 
@@ -189,43 +265,114 @@ function installWireGuard() {
 	# Run setup questions first
 	installQuestions
 
+	# Check if we need to use BoringTun instead of WireGuard kernel module
+	if [[ ${LXC_HASWIREGUARD} == false ]]; then
+		echo ""
+		echo "WireGuard kernel module is not available in this LXC container."
+		echo "You can install BoringTun (userspace WireGuard implementation) instead."
+		echo ""
+		read -rp "Do you want to install BoringTun? [y/n]: " -e INSTALL_BORINGTUN
+		INSTALL_BORINGTUN=${INSTALL_BORINGTUN:-n}
+		if [[ $INSTALL_BORINGTUN != 'y' && $INSTALL_BORINGTUN != 'Y' ]]; then
+			echo "WireGuard kernel module is required. Exiting..."
+			exit 1
+		fi
+		echo "Installing BoringTun instead of WireGuard kernel module..."
+	fi
+
 	# Install WireGuard tools and module
-	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' && ${VERSION_ID} -gt 10 ]]; then
-		apt-get update
-		apt-get install -y wireguard iptables resolvconf qrencode
-	elif [[ ${OS} == 'debian' ]]; then
-		if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
-			echo "deb http://deb.debian.org/debian buster-backports main" >/etc/apt/sources.list.d/backports.list
+	if [[ ${LXC_HASWIREGUARD} == false && ${INSTALL_BORINGTUN} == 'y' ]]; then
+		# Install BoringTun instead of WireGuard kernel module
+		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
 			apt-get update
+			apt-get install -y curl iptables resolvconf qrencode build-essential pkg-config libssl-dev wireguard-tools
+			# Install Rust and Cargo
+			curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+			source ~/.cargo/env
+			# Install BoringTun via Cargo
+			cargo install boringtun-cli
+			# Create symlink for wg command
+			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
+		elif [[ ${OS} == 'fedora' ]]; then
+			dnf install -y curl iptables qrencode gcc openssl-devel wireguard-tools
+			# Install Rust and Cargo
+			curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+			source ~/.cargo/env
+			# Install BoringTun via Cargo
+			cargo install boringtun-cli
+			# Create symlink for wg command
+			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
+		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
+			yum install -y curl iptables gcc openssl-devel wireguard-tools
+			# Install Rust and Cargo
+			curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+			source ~/.cargo/env
+			# Install BoringTun via Cargo
+			cargo install boringtun-cli
+			# Create symlink for wg command
+			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
+		elif [[ ${OS} == 'arch' ]]; then
+			pacman -S --needed --noconfirm curl qrencode rust wireguard-tools
+			# Install BoringTun via Cargo
+			cargo install boringtun-cli
+			# Create symlink for wg command
+			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
+		elif [[ ${OS} == 'alpine' ]]; then
+			apk update
+			apk add curl iptables libqrencode-tools rust cargo wireguard-tools
+			# Install BoringTun via Cargo
+			cargo install boringtun-cli
+			# Create symlink for wg command
+			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
 		fi
-		apt update
-		apt-get install -y iptables resolvconf qrencode
-		apt-get install -y -t buster-backports wireguard
-	elif [[ ${OS} == 'fedora' ]]; then
-		if [[ ${VERSION_ID} -lt 32 ]]; then
-			dnf install -y dnf-plugins-core
-			dnf copr enable -y jdoss/wireguard
-			dnf install -y wireguard-dkms
+		echo "BoringTun installed successfully."
+		
+		# Set environment variables for BoringTun
+		echo "WG_QUICK_USERSPACE_IMPLEMENTATION=boringtun-cli" >> /etc/environment
+		echo "WG_SUDO=1" >> /etc/environment
+		echo "Environment variables set for BoringTun userspace implementation."
+	else
+		# Install regular WireGuard
+		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' && ${VERSION_ID} -gt 10 ]]; then
+			apt-get update
+			apt-get install -y wireguard iptables resolvconf qrencode
+		elif [[ ${OS} == 'debian' && ${VERSION_ID} == 10 ]]; then
+			if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
+				echo "deb http://deb.debian.org/debian buster-backports main" >/etc/apt/sources.list.d/backports.list
+				apt-get update
+			fi
+			apt update
+			apt-get install -y iptables resolvconf qrencode
+			apt-get install -y -t buster-backports wireguard
+		elif [[ ${OS} == 'debian' ]]; then
+			apt-get update
+			apt-get install -y wireguard iptables resolvconf qrencode
+		elif [[ ${OS} == 'fedora' ]]; then
+			if [[ ${VERSION_ID} -lt 32 ]]; then
+				dnf install -y dnf-plugins-core
+				dnf copr enable -y jdoss/wireguard
+				dnf install -y wireguard-dkms
+			fi
+			dnf install -y wireguard-tools iptables qrencode
+		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
+			if [[ ${VERSION_ID} == 8* ]]; then
+				yum install -y epel-release elrepo-release
+				yum install -y kmod-wireguard
+				yum install -y qrencode # not available on release 9
+			fi
+			yum install -y wireguard-tools iptables
+		elif [[ ${OS} == 'oracle' ]]; then
+			dnf install -y oraclelinux-developer-release-el8
+			dnf config-manager --disable -y ol8_developer
+			dnf config-manager --enable -y ol8_developer_UEKR6
+			dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'
+			dnf install -y wireguard-tools qrencode iptables
+		elif [[ ${OS} == 'arch' ]]; then
+			pacman -S --needed --noconfirm wireguard-tools qrencode
+		elif [[ ${OS} == 'alpine' ]]; then
+			apk update
+			apk add wireguard-tools iptables libqrencode-tools
 		fi
-		dnf install -y wireguard-tools iptables qrencode
-	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
-		if [[ ${VERSION_ID} == 8* ]]; then
-			yum install -y epel-release elrepo-release
-			yum install -y kmod-wireguard
-			yum install -y qrencode # not available on release 9
-		fi
-		yum install -y wireguard-tools iptables
-	elif [[ ${OS} == 'oracle' ]]; then
-		dnf install -y oraclelinux-developer-release-el8
-		dnf config-manager --disable -y ol8_developer
-		dnf config-manager --enable -y ol8_developer_UEKR6
-		dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'
-		dnf install -y wireguard-tools qrencode iptables
-	elif [[ ${OS} == 'arch' ]]; then
-		pacman -S --needed --noconfirm wireguard-tools qrencode
-	elif [[ ${OS} == 'alpine' ]]; then
-		apk update
-		apk add wireguard-tools iptables libqrencode-tools
 	fi
 
 	# Make sure the directory exists (this does not seem the be the case on fedora)
@@ -249,9 +396,22 @@ CLIENT_DNS_1=${CLIENT_DNS_1}
 CLIENT_DNS_2=${CLIENT_DNS_2}
 ALLOWED_IPS=${ALLOWED_IPS}" >/etc/wireguard/params
 
+	# Build address string based on available IP families
+	ADDRESS_STRING=""
+	if [[ ${HAS_IPV4} == true ]]; then
+		ADDRESS_STRING="${SERVER_WG_IPV4}/24"
+	fi
+	if [[ ${HAS_IPV6} == true ]]; then
+		if [[ -n ${ADDRESS_STRING} ]]; then
+			ADDRESS_STRING="${ADDRESS_STRING},${SERVER_WG_IPV6}/64"
+		else
+			ADDRESS_STRING="${SERVER_WG_IPV6}/64"
+		fi
+	fi
+
 	# Add server interface
 	echo "[Interface]
-Address = ${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64
+Address = ${ADDRESS_STRING}
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}" >"/etc/wireguard/${SERVER_WG_NIC}.conf"
 
@@ -261,23 +421,52 @@ PrivateKey = ${SERVER_PRIV_KEY}" >"/etc/wireguard/${SERVER_WG_NIC}.conf"
 		echo "PostUp = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewall-cmd --add-port ${SERVER_PORT}/udp && firewall-cmd --add-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade' && firewall-cmd --add-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/24 masquerade'
 PostDown = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewall-cmd --remove-port ${SERVER_PORT}/udp && firewall-cmd --remove-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade' && firewall-cmd --remove-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/24 masquerade'" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	else
-		echo "PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
-PostUp = iptables -I FORWARD -i ${SERVER_PUB_NIC} -o ${SERVER_WG_NIC} -j ACCEPT
+		# Use separate interfaces for IPv4 and IPv6 if they exist, otherwise use the primary interface
+		IPV4_INTERFACE="${SERVER_NIC_V4:-${SERVER_PUB_NIC}}"
+		IPV6_INTERFACE="${SERVER_NIC_V6:-${SERVER_PUB_NIC}}"
+		
+		# Build PostUp/PostDown rules based on available IP families
+		POSTUP_RULES="PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT"
+		POSTDOWN_RULES="PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT"
+		
+		if [[ ${HAS_IPV4} == true ]]; then
+			POSTUP_RULES="${POSTUP_RULES}
+PostUp = iptables -I FORWARD -i ${IPV4_INTERFACE} -o ${SERVER_WG_NIC} -j ACCEPT
 PostUp = iptables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostUp = ip6tables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostUp = ip6tables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${SERVER_PUB_NIC} -o ${SERVER_WG_NIC} -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -o ${IPV4_INTERFACE} -j MASQUERADE"
+			POSTDOWN_RULES="${POSTDOWN_RULES}
+PostDown = iptables -D FORWARD -i ${IPV4_INTERFACE} -o ${SERVER_WG_NIC} -j ACCEPT
 PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -o ${IPV4_INTERFACE} -j MASQUERADE"
+		fi
+		
+		if [[ ${HAS_IPV6} == true ]]; then
+			POSTUP_RULES="${POSTUP_RULES}
+PostUp = ip6tables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
+PostUp = ip6tables -t nat -A POSTROUTING -o ${IPV6_INTERFACE} -j MASQUERADE"
+			POSTDOWN_RULES="${POSTDOWN_RULES}
 PostDown = ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+PostDown = ip6tables -t nat -D POSTROUTING -o ${IPV6_INTERFACE} -j MASQUERADE"
+		fi
+		
+		echo "${POSTUP_RULES}
+${POSTDOWN_RULES}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	fi
 
-	# Enable routing on the server
-	echo "net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
+	# Enable routing on the server based on available IP families
+	SYSCTL_RULES=""
+	if [[ ${HAS_IPV4} == true ]]; then
+		SYSCTL_RULES="net.ipv4.ip_forward = 1"
+	fi
+	if [[ ${HAS_IPV6} == true ]]; then
+		if [[ -n ${SYSCTL_RULES} ]]; then
+			SYSCTL_RULES="${SYSCTL_RULES}
+net.ipv6.conf.all.forwarding = 1"
+		else
+			SYSCTL_RULES="net.ipv6.conf.all.forwarding = 1"
+		fi
+	fi
+	echo "${SYSCTL_RULES}" >/etc/sysctl.d/wg.conf
 
 	if [[ ${OS} == 'alpine' ]]; then
 		sysctl -p /etc/sysctl.d/wg.conf
