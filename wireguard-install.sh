@@ -67,6 +67,45 @@ function checkVirt() {
 	fi
 }
 
+is_non_routable() {
+    local ip=$1
+    # Convert IP to integer for comparison
+    ip_to_int() {
+        local a b c d
+        IFS=. read -r a b c d <<< "$1"
+        echo $(( (a<<24) + (b<<16) + (c<<8) + d ))
+    }
+
+    ip_int=$(ip_to_int "$ip")
+
+    # Define non-routable ranges as integer boundaries
+    declare -A ranges=(
+        ["10.0.0.0/8"]="167772160 184549375"           # RFC 1918
+        ["172.16.0.0/12"]="2886729728 2887778303"     # RFC 1918
+        ["192.168.0.0/16"]="3232235520 3232301055"    # RFC 1918
+        ["100.64.0.0/10"]="1681915904 1686110207"     # CGNAT (RFC 6598)
+        ["192.0.0.0/24"]="3221225472 3221225727"      # 464XLAT/CLAT (RFC 7335)
+        ["0.0.0.0/8"]="0 16777215"                    # This network
+        ["127.0.0.0/8"]="2130706432 2147483647"       # Loopback
+        ["169.254.0.0/16"]="2851995648 2852061183"    # Link-local
+        ["192.0.2.0/24"]="3221225984 3221226239"      # TEST-NET-1
+        ["198.51.100.0/24"]="3325256704 3325256959"   # TEST-NET-2
+        ["203.0.113.0/24"]="3399667712 3399667967"    # TEST-NET-3
+        ["224.0.0.0/4"]="3758096384 4026531839"       # Multicast
+        ["240.0.0.0/4"]="4026531840 4294967295"       # Reserved (Class E)
+    )
+
+    for range in "${!ranges[@]}"; do
+        read -r start end <<< "${ranges[$range]}"
+        if [ "$ip_int" -ge "$start" ] && [ "$ip_int" -le "$end" ]; then
+            echo "IP $ip is non-routable ($range)"
+            return 0
+        fi
+    done
+    echo "IP $ip is routable"
+    return 1
+}
+
 function checkOS() {
 	source /etc/os-release
 	OS="${ID}"
@@ -151,23 +190,68 @@ function installQuestions() {
 	echo ""
 
 	# Detect public IPv4 or IPv6 address and pre-fill for the user
-	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
-	IP_FAMILY="ipv4"
-	HAS_IPV4=true
-	HAS_IPV6=false
+	SERVER_PUB_IP_V4=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
+	SERVER_PUB_IP_V6=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 	
-	if [[ -z ${SERVER_PUB_IP} ]]; then
-		# Detect public IPv6 address
-		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
-		IP_FAMILY="ipv6"
-		HAS_IPV4=false
-		HAS_IPV6=true
-	else
-		# Check if IPv6 is also available
-		IPV6_TEST=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
-		if [[ -n ${IPV6_TEST} ]]; then
-			HAS_IPV6=true
+	HAS_IPV4=false
+	HAS_IPV6=false
+	IP_FAMILY=""
+	
+	# Check if IPv4 is available and public
+	if [[ -n ${SERVER_PUB_IP_V4} ]]; then
+		if is_non_routable "${SERVER_PUB_IP_V4}"; then
+			echo "Detected non-routable IPv4 address: ${SERVER_PUB_IP_V4}"
+			HAS_IPV4=false
+		else
+			echo "Detected public IPv4 address: ${SERVER_PUB_IP_V4}"
+			HAS_IPV4=true
 		fi
+	fi
+	
+	# Check if IPv6 is available
+	if [[ -n ${SERVER_PUB_IP_V6} ]]; then
+		echo "Detected IPv6 address: ${SERVER_PUB_IP_V6}"
+		HAS_IPV6=true
+	fi
+	
+	# Determine which IP to use as default
+	if [[ ${HAS_IPV4} == true && ${HAS_IPV6} == true ]]; then
+		# Both available, prefer IPv4 for better compatibility
+		SERVER_PUB_IP="${SERVER_PUB_IP_V4}"
+		IP_FAMILY="ipv4"
+		echo "Using public IPv4 as default (IPv6 also available)"
+	elif [[ ${HAS_IPV4} == true ]]; then
+		# Only IPv4 available
+		SERVER_PUB_IP="${SERVER_PUB_IP_V4}"
+		IP_FAMILY="ipv4"
+		echo "Using public IPv4 as default"
+	elif [[ ${HAS_IPV6} == true ]]; then
+		# Only IPv6 available or IPv4 is private
+		SERVER_PUB_IP="${SERVER_PUB_IP_V6}"
+		IP_FAMILY="ipv6"
+		if [[ -n ${SERVER_PUB_IP_V4} ]]; then
+			echo "IPv4 is non-routable, using IPv6 as default"
+		else
+			echo "Using IPv6 as default"
+		fi
+	else
+		# No public IPs detected
+		echo "No public IPv4 or IPv6 addresses detected"
+		echo "You may need to manually specify your public IP address"
+		SERVER_PUB_IP=""
+		IP_FAMILY=""
+	fi
+	if [[ -z ${SERVER_PUB_IP} ]]; then
+		echo ""
+		echo "No public IP address was automatically detected."
+		echo "This might happen if:"
+		echo "  - You're behind NAT"
+		echo "  - You're in a private network"
+		echo "  - Your server uses a different network configuration"
+		echo ""
+		echo "Please enter your server's public IP address manually."
+		echo "You can find it by visiting: https://whatismyipaddress.com/"
+		echo ""
 	fi
 	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 
@@ -203,7 +287,7 @@ function installQuestions() {
 	DEFAULT_IPV4="10.${RANDOM_IPV4_SECOND}.${RANDOM_IPV4_THIRD}.1"
 	DEFAULT_IPV6="fd42:${RANDOM_IPV4_SECOND}:${RANDOM_IPV4_THIRD}::1"
 
-	# Only prompt for IPv4 if the server has IPv4
+	# Only prompt for IPv4 if the server has public IPv4
 	if [[ ${HAS_IPV4} == true ]]; then
 		until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
 			read -rp "Server WireGuard IPv4: " -e -i "${DEFAULT_IPV4}" SERVER_WG_IPV4
