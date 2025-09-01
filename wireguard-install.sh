@@ -594,6 +594,11 @@ Address = ${ADDRESS_STRING}
 ListenPort = ${SERVER_PORT}
 PrivateKey = ${SERVER_PRIV_KEY}" >"/etc/wireguard/${SERVER_WG_NIC}.conf"
 
+	# Add MTU setting for BoringTun
+	if [[ ${INSTALL_BORINGTUN} == 'y' ]]; then
+		echo "MTU = 1420" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+	fi
+
 	if pgrep firewalld; then
 		FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_WG_IPV4}" | cut -d"." -f1-3)".0"
 		FIREWALLD_IPV6_ADDRESS=$(echo "${SERVER_WG_IPV6}" | sed 's/:[^:]*$/:0/')
