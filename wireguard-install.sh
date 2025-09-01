@@ -268,34 +268,34 @@ function installQuestions() {
 		HAS_IPV6=true
 	fi
 	
-	# Determine which IP to use as default
+	# Determine which IP to suggest as default
 	if [[ ${HAS_ROUTABLE_IPV4} == true && ${HAS_IPV6} == true ]]; then
 		# Both available, prefer IPv4 for better compatibility
-		SERVER_PUB_IP="${SERVER_PUB_IP_V4}"
+		DEFAULT_PUB_IP="${SERVER_PUB_IP_V4}"
 		IP_FAMILY="ipv4"
-		echo "Using public IPv4 as default (IPv6 also available)"
+		echo "Suggesting public IPv4 as default (IPv6 also available)"
 	elif [[ ${HAS_ROUTABLE_IPV4} == true ]]; then
 		# Only routable IPv4 available
-		SERVER_PUB_IP="${SERVER_PUB_IP_V4}"
+		DEFAULT_PUB_IP="${SERVER_PUB_IP_V4}"
 		IP_FAMILY="ipv4"
-		echo "Using public IPv4 as default"
+		echo "Suggesting public IPv4 as default"
 	elif [[ ${HAS_IPV6} == true ]]; then
 		# Only IPv6 available or IPv4 is non-routable
-		SERVER_PUB_IP="${SERVER_PUB_IP_V6}"
+		DEFAULT_PUB_IP="${SERVER_PUB_IP_V6}"
 		IP_FAMILY="ipv6"
 		if [[ -n ${SERVER_PUB_IP_V4} ]]; then
-			echo "IPv4 is non-routable, using IPv6 as default"
+			echo "IPv4 is non-routable, suggesting IPv6 as default"
 		else
-			echo "Using IPv6 as default"
+			echo "Suggesting IPv6 as default"
 		fi
 	else
 		# No public IPs detected
 		echo "No public IPv4 or IPv6 addresses detected"
 		echo "You may need to manually specify your public IP address"
-		SERVER_PUB_IP=""
+		DEFAULT_PUB_IP=""
 		IP_FAMILY=""
 	fi
-	if [[ -z ${SERVER_PUB_IP} ]]; then
+	if [[ -z ${DEFAULT_PUB_IP} ]]; then
 		echo ""
 		echo "No public IP address was automatically detected."
 		echo "This might happen if:"
@@ -308,7 +308,7 @@ function installQuestions() {
 	fi
 	echo ""
 	until is_valid_ip "${SERVER_PUB_IP}"; do
-		read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+		read -rp "IPv4 or IPv6 public address: " -e -i "${DEFAULT_PUB_IP}" SERVER_PUB_IP
 	done
 
 	# Detect public interfaces for both IPv4 and IPv6
@@ -505,6 +505,14 @@ function installWireGuard() {
 			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
 		fi
 		echo "BoringTun installed successfully."
+		
+		# Configure systemd service for BoringTun
+		if [[ ${OS} != 'alpine' ]]; then
+			sed -i "19 i Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=$HOME/.cargo/bin/boringtun-cli" /lib/systemd/system/wg-quick@.service
+			sed -i '20 i Environment=WG_SUDO=1' /lib/systemd/system/wg-quick@.service
+			systemctl daemon-reload
+			echo "Systemd service configured for BoringTun."
+		fi
 		
 		# Set environment variables for BoringTun
 		echo "WG_QUICK_USERSPACE_IMPLEMENTATION=boringtun-cli" >> /etc/environment
