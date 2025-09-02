@@ -71,9 +71,18 @@ function checkVirt() {
 			success "WireGuard kernel module is available on disk."
 			LXC_HASWIREGUARD=true
 		else
-			highlight "Warning: WireGuard kernel module is not available in this LXC container."
-			warning "You can install BoringTun (userspace WireGuard implementation) instead."
-			LXC_HASWIREGUARD=false
+			# Try to create a temporary test interface to verify kernel module functionality
+			info "Testing WireGuard kernel module functionality..."
+			if ip link add dev wg-test type wireguard 2>/dev/null; then
+				success "WireGuard kernel module is functional (test interface created successfully)."
+				# Clean up the test interface
+				ip link del dev wg-test 2>/dev/null
+				LXC_HASWIREGUARD=true
+			else
+				highlight "Warning: WireGuard kernel module is not available or functional in this LXC container."
+				warning "You can install BoringTun (userspace WireGuard implementation) instead."
+				LXC_HASWIREGUARD=false
+			fi
 		fi
 	}
 	if command -v virt-what &>/dev/null; then
