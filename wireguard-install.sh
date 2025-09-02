@@ -754,7 +754,7 @@ function installWireGuard() {
 		
 		# Configure systemd service for BoringTun
 		if [[ ${OS} != 'alpine' ]]; then
-			sed -i '19 i Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=boringtun' /lib/systemd/system/wg-quick@.service
+			sed -i '19 i Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=boringtun-cli' /lib/systemd/system/wg-quick@.service
 			sed -i '20 i Environment=WG_SUDO=1' /lib/systemd/system/wg-quick@.service
 			systemctl daemon-reload
 			echo "Systemd service configured for BoringTun."
