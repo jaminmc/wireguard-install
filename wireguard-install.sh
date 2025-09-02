@@ -690,9 +690,6 @@ install_boringtun() {
 	
 	# Install BoringTun via Cargo directly to /usr/local
 	cargo install --root /usr/local boringtun-cli
-	
-	# Create symlink for wg command (now directly from /usr/local/bin)
-	ln -sf /usr/local/bin/boringtun-cli /usr/local/bin/wg
 }
 
 remove_packages() {
