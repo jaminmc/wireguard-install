@@ -610,33 +610,9 @@ install_packages() {
 	case $os in
 		'ubuntu'|'debian')
 			apt-get update
+			apt-get install -y $packages
 			if [[ $boringtun == true ]]; then
-				# For BoringTun, install most packages normally, but wireguard-tools without recommends
-				local wireguard_tools_packages=""
-				local other_packages=""
-				
-				# Separate wireguard-tools from other packages
-				for pkg in $packages; do
-					if [[ $pkg == "wireguard-tools" ]]; then
-						wireguard_tools_packages="$wireguard_tools_packages $pkg"
-					else
-						other_packages="$other_packages $pkg"
-					fi
-				done
-				
-				# Install other packages normally
-				if [[ -n "$other_packages" ]]; then
-					apt-get install -y $other_packages
-				fi
-				
-				# Install wireguard-tools without recommends to avoid kernel module
-				if [[ -n "$wireguard_tools_packages" ]]; then
-					apt-get install -y --no-install-recommends $wireguard_tools_packages
-				fi
-				
 				install_boringtun "${os}"
-			else
-				apt-get install -y $packages
 			fi
 			;;
 		'fedora')
@@ -646,63 +622,15 @@ install_packages() {
 			fi
 			;;
 		'centos'|'almalinux'|'rocky')
+			yum install -y $packages
 			if [[ $boringtun == true ]]; then
-				# For BoringTun, install most packages normally, but wireguard-tools without weak deps
-				local wireguard_tools_packages=""
-				local other_packages=""
-				
-				# Separate wireguard-tools from other packages
-				for pkg in $packages; do
-					if [[ $pkg == "wireguard-tools" ]]; then
-						wireguard_tools_packages="$wireguard_tools_packages $pkg"
-					else
-						other_packages="$other_packages $pkg"
-					fi
-				done
-				
-				# Install other packages normally
-				if [[ -n "$other_packages" ]]; then
-					yum install -y $other_packages
-				fi
-				
-				# Install wireguard-tools without weak deps to avoid kernel modules
-				if [[ -n "$wireguard_tools_packages" ]]; then
-					yum install -y --setopt=install_weak_deps=0 $wireguard_tools_packages
-				fi
-				
 				install_boringtun "${os}"
-			else
-				yum install -y $packages
 			fi
 			;;
 		'oracle')
+			dnf install -y $packages
 			if [[ $boringtun == true ]]; then
-				# For BoringTun, install most packages normally, but wireguard-tools without weak deps
-				local wireguard_tools_packages=""
-				local other_packages=""
-				
-				# Separate wireguard-tools from other packages
-				for pkg in $packages; do
-					if [[ $pkg == "wireguard-tools" ]]; then
-						wireguard_tools_packages="$wireguard_tools_packages $pkg"
-					else
-						other_packages="$other_packages $pkg"
-					fi
-				done
-				
-				# Install other packages normally
-				if [[ -n "$other_packages" ]]; then
-					dnf install -y $other_packages
-				fi
-				
-				# Install wireguard-tools without weak deps to avoid kernel modules
-				if [[ -n "$wireguard_tools_packages" ]]; then
-					dnf install -y --setopt=install_weak_deps=0 $wireguard_tools_packages
-				fi
-				
 				install_boringtun "${os}"
-			else
-				dnf install -y $packages
 			fi
 			;;
 		'arch')
