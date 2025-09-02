@@ -658,11 +658,11 @@ install_boringtun() {
 		source ~/.cargo/env
 	fi
 	
-	# Install BoringTun via Cargo
-	cargo install boringtun-cli
+	# Install BoringTun via Cargo directly to /usr/local
+	cargo install --root /usr/local boringtun-cli
 	
-	# Create symlink for wg command
-	ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
+	# Create symlink for wg command (now directly from /usr/local/bin)
+	ln -sf /usr/local/bin/boringtun-cli /usr/local/bin/wg
 }
 
 remove_packages() {
@@ -698,6 +698,27 @@ function installWireGuard() {
 		echo ""
 		highlight "WireGuard kernel module is not available in this LXC container."
 		warning "You can install BoringTun (userspace WireGuard implementation) instead."
+		echo ""
+		
+		# Check if TUN device is available (required for BoringTun)
+		if [[ ! -e /dev/net/tun ]]; then
+			error "TUN device (/dev/net/tun) is not available."
+			echo ""
+			warning "BoringTun requires a TUN device to function. This device is typically:"
+			warning "  - Created by the 'tun' kernel module"
+			warning "  - Available in most VPS environments"
+			warning "  - Required for userspace VPN implementations"
+			echo ""
+			info "To enable the TUN device, you can try:"
+			info "  1. Load the tun module: modprobe tun"
+			info "  2. Check if it's available: ls -la /dev/net/tun"
+			info "  3. If the module doesn't exist, contact your hosting provider"
+			echo ""
+			error "Cannot proceed without TUN device. Exiting..."
+			exit 1
+		fi
+		
+		success "TUN device is available. Proceeding with BoringTun installation..."
 		echo ""
 		read -rp "Do you want to install BoringTun? [y/n]: " -e INSTALL_BORINGTUN
 		INSTALL_BORINGTUN=${INSTALL_BORINGTUN:-n}
