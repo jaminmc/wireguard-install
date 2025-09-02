@@ -3,10 +3,33 @@
 # Secure WireGuard server installer
 # https://github.com/angristan/wireguard-install
 
-RED='\033[0;31m'
-ORANGE='\033[0;33m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+RED='\033[0;31m'      # Error messages
+ORANGE='\033[0;33m'   # Warning messages  
+GREEN='\033[0;32m'    # Success messages
+BLUE='\033[0;34m'     # Info messages
+YELLOW='\033[1;33m'   # Highlighted warnings
+NC='\033[0m'          # No color (reset)
+
+# Color utility functions
+error() {
+    echo -e "${RED}$1${NC}"
+}
+
+warning() {
+    echo -e "${ORANGE}$1${NC}"
+}
+
+success() {
+    echo -e "${GREEN}$1${NC}"
+}
+
+info() {
+    echo -e "${BLUE}$1${NC}"
+}
+
+highlight() {
+    echo -e "${YELLOW}$1${NC}"
+}
 
 function isRoot() {
 	if [ "${EUID}" -ne 0 ]; then
@@ -21,32 +44,35 @@ function checkVirt() {
 		exit 1
 	}
 	function lxcErr() {
-		echo "LXC is not supported (yet)."
-		echo "WireGuard can technically run in an LXC container,"
-		echo "but the kernel module has to be installed on the host,"
-		echo "the container has to be run with some specific parameters"
-		echo "and only the tools need to be installed in the container."
+		highlight "LXC is in Beta."
+		warning "WireGuard can technically run in an LXC container,"
+		warning "but the kernel module has to be installed on the host,"
+		warning "the container has to be run with some specific parameters"
+		warning "and only the tools need to be installed in the container."
+		echo ""
+		warning "If WireGuard is not in your kernel,"
+		warning "this will give the option to try to install BoringTun instead"
 		echo ""
 		read -rp "Do you want to continue anyway? [y/n]: " -e CONTINUE_LXC
 		CONTINUE_LXC=${CONTINUE_LXC:-n}
 		if [[ $CONTINUE_LXC != 'y' && $CONTINUE_LXC != 'Y' ]]; then
 			exit 1
 		fi
-		echo "Continuing with LXC environment..."
+		success "Continuing with LXC environment..."
 		
 		# Check if WireGuard kernel module is available
 		if lsmod | grep -q wireguard; then
-			echo "WireGuard kernel module is loaded and available."
+			success "WireGuard kernel module is loaded and available."
 			LXC_HASWIREGUARD=true
 		elif [ -e "/sys/module/wireguard" ]; then
-			echo "WireGuard kernel module is available (built into kernel)."
+			success "WireGuard kernel module is available (built into kernel)."
 			LXC_HASWIREGUARD=true
 		elif [ -e "/lib/modules/$(uname -r)/kernel/net/wireguard/wireguard.ko" ] || [ -e "/lib/modules/$(uname -r)/kernel/net/wireguard/wireguard.ko.xz" ]; then
-			echo "WireGuard kernel module is available on disk."
+			success "WireGuard kernel module is available on disk."
 			LXC_HASWIREGUARD=true
 		else
-			echo "Warning: WireGuard kernel module is not available in this LXC container."
-			echo "The kernel module must be installed on the host system."
+			highlight "Warning: WireGuard kernel module is not available in this LXC container."
+			warning "You can install BoringTun (userspace WireGuard implementation) instead."
 			LXC_HASWIREGUARD=false
 		fi
 	}
@@ -80,7 +106,7 @@ is_non_routable() {
 
     # Define non-routable ranges as integer boundaries
     declare -A ranges=(
-        ["10.0.0.0/8"]="167772160 184549375"           # RFC 1918
+        ["10.0.0.0/8"]="167772160 184549375"          # RFC 1918
         ["172.16.0.0/12"]="2886729728 2887778303"     # RFC 1918
         ["192.168.0.0/16"]="3232235520 3232301055"    # RFC 1918
         ["100.64.0.0/10"]="1681915904 1686110207"     # CGNAT (RFC 6598)
@@ -155,6 +181,47 @@ get_system_dns() {
     
     # Return the detected DNS servers
     echo "$dns1 $dns2"
+}
+
+get_external_ip() {
+    local external_ip=""
+    
+    # Try curl first (more common)
+    if command -v curl &>/dev/null; then
+        external_ip=$(curl -s --max-time 10 --connect-timeout 5 \
+            -H "User-Agent: WireGuard-Installer/1.0" \
+            https://ipinfo.io/ip 2>/dev/null)
+        
+        # If curl fails, try alternative services
+        if [[ -z "$external_ip" ]] || ! is_valid_ip "$external_ip"; then
+            external_ip=$(curl -s --max-time 10 --connect-timeout 5 \
+                -H "User-Agent: WireGuard-Installer/1.0" \
+                https://icanhazip.com 2>/dev/null | tr -d '\n\r')
+        fi
+        
+        if [[ -z "$external_ip" ]] || ! is_valid_ip "$external_ip"; then
+            external_ip=$(curl -s --max-time 10 --connect-timeout 5 \
+                -H "User-Agent: WireGuard-Installer/1.0" \
+                https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r')
+        fi
+    fi
+    
+    # If curl failed or not available, try wget
+    if [[ -z "$external_ip" ]] || ! is_valid_ip "$external_ip"; then
+        if command -v wget &>/dev/null; then
+            external_ip=$(wget -qO- --timeout=10 --tries=1 \
+                --user-agent="WireGuard-Installer/1.0" \
+                https://ipinfo.io/ip 2>/dev/null)
+            
+            if [[ -z "$external_ip" ]] || ! is_valid_ip "$external_ip"; then
+                external_ip=$(wget -qO- --timeout=10 --tries=1 \
+                    --user-agent="WireGuard-Installer/1.0" \
+                    https://icanhazip.com 2>/dev/null | tr -d '\n\r')
+            fi
+        fi
+    fi
+    
+    echo "$external_ip"
 }
 
 function checkOS() {
@@ -233,11 +300,11 @@ function initialCheck() {
 }
 
 function installQuestions() {
-	echo "Welcome to the WireGuard installer!"
-	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
+	success "Welcome to the WireGuard installer!"
+	info "The git repository is available at: https://github.com/angristan/wireguard-install"
 	echo ""
-	echo "I need to ask you a few questions before starting the setup."
-	echo "You can keep the default options and just press enter if you are ok with them."
+	info "I need to ask you a few questions before starting the setup."
+	info "You can keep the default options and just press enter if you are ok with them."
 	echo ""
 
 	# Detect public IPv4 or IPv6 address and pre-fill for the user
@@ -252,11 +319,9 @@ function installQuestions() {
 	# Check if IPv4 is available (both public and private)
 	if [[ -n ${SERVER_PUB_IP_V4} ]]; then
 		if is_non_routable "${SERVER_PUB_IP_V4}"; then
-			echo "Detected non-routable IPv4 address: ${SERVER_PUB_IP_V4}"
 			HAS_IPV4=true  # Still has IPv4, just not routable
 			HAS_ROUTABLE_IPV4=false
 		else
-			echo "Detected public IPv4 address: ${SERVER_PUB_IP_V4}"
 			HAS_IPV4=true
 			HAS_ROUTABLE_IPV4=true
 		fi
@@ -264,7 +329,6 @@ function installQuestions() {
 	
 	# Check if IPv6 is available
 	if [[ -n ${SERVER_PUB_IP_V6} ]]; then
-		echo "Detected IPv6 address: ${SERVER_PUB_IP_V6}"
 		HAS_IPV6=true
 	fi
 	
@@ -273,40 +337,71 @@ function installQuestions() {
 		# Both available, prefer IPv4 for better compatibility
 		DEFAULT_PUB_IP="${SERVER_PUB_IP_V4}"
 		IP_FAMILY="ipv4"
-		echo "Suggesting public IPv4 as default (IPv6 also available)"
 	elif [[ ${HAS_ROUTABLE_IPV4} == true ]]; then
 		# Only routable IPv4 available
 		DEFAULT_PUB_IP="${SERVER_PUB_IP_V4}"
 		IP_FAMILY="ipv4"
-		echo "Suggesting public IPv4 as default"
 	elif [[ ${HAS_IPV6} == true ]]; then
 		# Only IPv6 available or IPv4 is non-routable
 		DEFAULT_PUB_IP="${SERVER_PUB_IP_V6}"
 		IP_FAMILY="ipv6"
-		if [[ -n ${SERVER_PUB_IP_V4} ]]; then
-			echo "IPv4 is non-routable, suggesting IPv6 as default"
-		else
-			echo "Suggesting IPv6 as default"
-		fi
 	else
 		# No public IPs detected
-		echo "No public IPv4 or IPv6 addresses detected"
-		echo "You may need to manually specify your public IP address"
 		DEFAULT_PUB_IP=""
 		IP_FAMILY=""
 	fi
 	if [[ -z ${DEFAULT_PUB_IP} ]]; then
 		echo ""
-		echo "No public IP address was automatically detected."
-		echo "This might happen if:"
-		echo "  - You're behind NAT"
-		echo "  - You're in a private network"
-		echo "  - Your server uses a different network configuration"
+		highlight "No public IP address was automatically detected."
+		warning "This might happen if:"
+		warning "  - You're behind NAT"
+		warning "  - You're in a private network"
+		warning "  - Your server uses a different network configuration"
 		echo ""
-		echo "Please enter your server's public IP address manually."
-		echo "You can find it by visiting: https://whatismyipaddress.com/"
+		
+		# Try to detect external IP address
+		info "Attempting to detect your external public IP address..."
+		EXTERNAL_IP=$(get_external_ip)
+		
+		if [[ -n "$EXTERNAL_IP" ]] && is_valid_ip "$EXTERNAL_IP"; then
+			success "Detected external public IP: $EXTERNAL_IP"
+			DEFAULT_PUB_IP="$EXTERNAL_IP"
+			success "This will be used as the default suggestion."
+			echo ""
+			highlight "IMPORTANT: Since you're behind NAT, you will need to:"
+			warning "  1. Port forward UDP port [WIREGUARD_PORT] from your router to this server"
+			warning "  2. Use the external IP address ($EXTERNAL_IP) for client connections"
+		else
+			error "Could not automatically detect external IP address."
+			warning "Please enter your server's public IP address manually."
+			info "You can find it by visiting: https://whatismyipaddress.com/"
+			echo ""
+			highlight "IMPORTANT: Since you're behind NAT, you will need to:"
+			warning "  1. Port forward UDP port [WIREGUARD_PORT] from your router to this server"
+			warning "  2. Use the external IP address for client connections"
+		fi
+	fi
+	
+	# Display concise IP detection summary before user input
+	info "Network detection:"
+	if [[ -n ${SERVER_PUB_IP_V4} ]]; then
+		if [[ ${HAS_ROUTABLE_IPV4} == true ]]; then
+			echo "  $(success "IPv4: ${SERVER_PUB_IP_V4} (${SERVER_NIC_V4}) - public")"
+		else
+			echo "  $(warning "IPv4: ${SERVER_PUB_IP_V4} (${SERVER_NIC_V4}) - not publicly routable")"
+		fi
+	fi
+	if [[ -n ${SERVER_PUB_IP_V6} ]]; then
+		echo "  $(success "IPv6: ${SERVER_PUB_IP_V6} (${SERVER_NIC_V6})")"
+	fi
+	if [[ -z ${SERVER_PUB_IP_V4} && -z ${SERVER_PUB_IP_V6} ]]; then
+		echo "  $(highlight "No local public IP addresses detected")"
+		if [[ -n "$EXTERNAL_IP" ]] && is_valid_ip "$EXTERNAL_IP"; then
+			echo "  $(info "External IP: $EXTERNAL_IP (detected via internet)")"
+		fi
 	fi
 	echo ""
+	
 	until is_valid_ip "${SERVER_PUB_IP}"; do
 		read -rp "IPv4 or IPv6 public address: " -e -i "${DEFAULT_PUB_IP}" SERVER_PUB_IP
 	done
@@ -372,50 +467,112 @@ function installQuestions() {
 	SYSTEM_DNS_1=$(echo "$SYSTEM_DNS" | awk '{print $1}')
 	SYSTEM_DNS_2=$(echo "$SYSTEM_DNS" | awk '{print $2}')
 	
-	# Set DNS defaults based on available IP families and system DNS
+	# DNS server selection
+	echo ""
+	echo "DNS server options:"
+	if [[ ${SYSTEM_DNS_AVAILABLE} == true ]]; then
+		echo "1) System DNS servers: $SYSTEM_DNS_1${SYSTEM_DNS_2:+ and $SYSTEM_DNS_2}"
+	else
+		echo "1) System DNS servers: Not available"
+	fi
+	echo "2) Cloudflare DNS (1.1.1.1, 1.0.0.1)"
+	echo "3) Google Public DNS (8.8.8.8, 8.8.4.4)"
+	echo "4) Quad9 DNS (9.9.9.9, 149.112.112.112)"
+	echo "5) Custom DNS servers"
+	echo ""
+	
+	# Determine if system DNS is available and valid
+	SYSTEM_DNS_AVAILABLE=false
+	if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
+		SYSTEM_DNS_AVAILABLE=true
+	fi
+	
+	# Set DNS choices based on available IP families
 	if [[ ${HAS_IPV4} == true ]]; then
-		# Use system DNS if valid, otherwise fallback to Cloudflare
-		if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
-			DEFAULT_DNS_1="$SYSTEM_DNS_1"
-		else
-			DEFAULT_DNS_1="1.1.1.1"
-		fi
-		if [[ -n "$SYSTEM_DNS_2" ]] && is_valid_ip "$SYSTEM_DNS_2"; then
-			DEFAULT_DNS_2="$SYSTEM_DNS_2"
-		else
-			DEFAULT_DNS_2="1.0.0.1"
-		fi
+		CLOUDflare_DNS_1="1.1.1.1"
+		CLOUDflare_DNS_2="1.0.0.1"
+		GOOGLE_DNS_1="8.8.8.8"
+		GOOGLE_DNS_2="8.8.4.4"
+		QUAD9_DNS_1="9.9.9.9"
+		QUAD9_DNS_2="149.112.112.112"
 	else
 		# IPv6-only DNS servers
-		if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1" && [[ "$SYSTEM_DNS_1" =~ .*:.* ]]; then
-			DEFAULT_DNS_1="$SYSTEM_DNS_1"
-		else
-			DEFAULT_DNS_1="2606:4700:4700::1111"
-		fi
-		if [[ -n "$SYSTEM_DNS_2" ]] && is_valid_ip "$SYSTEM_DNS_2" && [[ "$SYSTEM_DNS_2" =~ .*:.* ]]; then
-			DEFAULT_DNS_2="$SYSTEM_DNS_2"
-		else
-			DEFAULT_DNS_2="2606:4700:4700::1001"
-		fi
+		CLOUDflare_DNS_1="2606:4700:4700::1111"
+		CLOUDflare_DNS_2="2606:4700:4700::1001"
+		GOOGLE_DNS_1="2001:4860:4860::8888"
+		GOOGLE_DNS_2="2001:4860:4860::8844"
+		QUAD9_DNS_1="2620:fe::fe"
+		QUAD9_DNS_2="2620:fe::9"
 	fi
 	
-	# Show detected system DNS servers
-	if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
-		echo "Detected system DNS servers: $SYSTEM_DNS_1${SYSTEM_DNS_2:+ and $SYSTEM_DNS_2}"
-	else
-		echo "Using fallback DNS servers: $DEFAULT_DNS_1${DEFAULT_DNS_2:+ and $DEFAULT_DNS_2}"
-	fi
-	
-	# DNS configuration
-	until is_valid_ip "${CLIENT_DNS_1}"; do
-		read -rp "First DNS resolver to use for the clients: " -e -i "${DEFAULT_DNS_1}" CLIENT_DNS_1
-	done
-	until is_valid_ip "${CLIENT_DNS_2}"; do
-		read -rp "Second DNS resolver to use for the clients (optional): " -e -i "${DEFAULT_DNS_2}" CLIENT_DNS_2
-		if [[ ${CLIENT_DNS_2} == "" ]]; then
-			CLIENT_DNS_2="${CLIENT_DNS_1}"
+	# DNS selection
+	until [[ ${DNS_CHOICE} =~ ^[1-5]$ ]]; do
+		if [[ ${SYSTEM_DNS_AVAILABLE} == true ]]; then
+			read -rp "Select DNS option [1-5]: " -e -i "1" DNS_CHOICE
+		else
+			read -rp "Select DNS option [2-5]: " -e -i "2" DNS_CHOICE
 		fi
 	done
+	
+	# Set DNS servers based on selection
+	case ${DNS_CHOICE} in
+		1)
+			if [[ ${SYSTEM_DNS_AVAILABLE} == true ]]; then
+				CLIENT_DNS_1="${SYSTEM_DNS_1}"
+				CLIENT_DNS_2="${SYSTEM_DNS_2}"
+				echo "Using system DNS servers: $CLIENT_DNS_1${CLIENT_DNS_2:+ and $CLIENT_DNS_2}"
+			else
+				echo "System DNS not available, defaulting to Cloudflare DNS"
+				CLIENT_DNS_1="${CLOUDflare_DNS_1}"
+				CLIENT_DNS_2="${CLOUDflare_DNS_2}"
+			fi
+			;;
+		2)
+			CLIENT_DNS_1="${CLOUDflare_DNS_1}"
+			CLIENT_DNS_2="${CLOUDflare_DNS_2}"
+			echo "Using Cloudflare DNS: $CLIENT_DNS_1 and $CLIENT_DNS_2"
+			;;
+		3)
+			CLIENT_DNS_1="${GOOGLE_DNS_1}"
+			CLIENT_DNS_2="${GOOGLE_DNS_2}"
+			echo "Using Google Public DNS: $CLIENT_DNS_1 and $CLIENT_DNS_2"
+			;;
+		4)
+			CLIENT_DNS_1="${QUAD9_DNS_1}"
+			CLIENT_DNS_2="${QUAD9_DNS_2}"
+			echo "Using Quad9 DNS: $CLIENT_DNS_1 and $CLIENT_DNS_2"
+			;;
+		5)
+			echo "Enter custom DNS servers:"
+			until is_valid_ip "${CLIENT_DNS_1}"; do
+				read -rp "First DNS resolver: " -e CLIENT_DNS_1
+			done
+			until is_valid_ip "${CLIENT_DNS_2}"; do
+				read -rp "Second DNS resolver (optional): " -e CLIENT_DNS_2
+				if [[ ${CLIENT_DNS_2} == "" ]]; then
+					CLIENT_DNS_2="${CLIENT_DNS_1}"
+				fi
+			done
+			;;
+	esac
+	
+	# Final confirmation/override option
+	echo ""
+	echo "Selected DNS servers: $CLIENT_DNS_1${CLIENT_DNS_2:+ and $CLIENT_DNS_2}"
+	read -rp "Press Enter to continue or type 'c' to change: " -e DNS_CONFIRM
+	if [[ ${DNS_CONFIRM} == "c" || ${DNS_CONFIRM} == "C" ]]; then
+		echo "Enter new DNS servers:"
+		until is_valid_ip "${CLIENT_DNS_1}"; do
+			read -rp "First DNS resolver: " -e CLIENT_DNS_1
+		done
+		until is_valid_ip "${CLIENT_DNS_2}"; do
+			read -rp "Second DNS resolver (optional): " -e CLIENT_DNS_2
+			if [[ ${CLIENT_DNS_2} == "" ]]; then
+				CLIENT_DNS_2="${CLIENT_DNS_1}"
+			fi
+		done
+		echo "Updated DNS servers: $CLIENT_DNS_1${CLIENT_DNS_2:+ and $CLIENT_DNS_2}"
+	fi
 
 	# Set default ALLOWED_IPS based on available IP families
 	if [[ ${HAS_IPV4} == true && ${HAS_IPV6} == true ]]; then
@@ -440,6 +597,165 @@ function installQuestions() {
 	read -n1 -r -p "Press any key to continue..."
 }
 
+# Package management functions
+install_packages() {
+	local os=$1
+	local packages=$2
+	local boringtun=${3:-false}
+	
+	case $os in
+		'ubuntu'|'debian')
+			apt-get update
+			if [[ $boringtun == true ]]; then
+				# For BoringTun, install most packages normally, but wireguard-tools without recommends
+				local wireguard_tools_packages=""
+				local other_packages=""
+				
+				# Separate wireguard-tools from other packages
+				for pkg in $packages; do
+					if [[ $pkg == "wireguard-tools" ]]; then
+						wireguard_tools_packages="$wireguard_tools_packages $pkg"
+					else
+						other_packages="$other_packages $pkg"
+					fi
+				done
+				
+				# Install other packages normally
+				if [[ -n "$other_packages" ]]; then
+					apt-get install -y $other_packages
+				fi
+				
+				# Install wireguard-tools without recommends to avoid kernel module
+				if [[ -n "$wireguard_tools_packages" ]]; then
+					apt-get install -y --no-install-recommends $wireguard_tools_packages
+				fi
+				
+				install_boringtun "${os}"
+			else
+				apt-get install -y $packages
+			fi
+			;;
+		'fedora')
+			dnf install -y $packages
+			if [[ $boringtun == true ]]; then
+				install_boringtun "${os}"
+			fi
+			;;
+		'centos'|'almalinux'|'rocky')
+			if [[ $boringtun == true ]]; then
+				# For BoringTun, install most packages normally, but wireguard-tools without weak deps
+				local wireguard_tools_packages=""
+				local other_packages=""
+				
+				# Separate wireguard-tools from other packages
+				for pkg in $packages; do
+					if [[ $pkg == "wireguard-tools" ]]; then
+						wireguard_tools_packages="$wireguard_tools_packages $pkg"
+					else
+						other_packages="$other_packages $pkg"
+					fi
+				done
+				
+				# Install other packages normally
+				if [[ -n "$other_packages" ]]; then
+					yum install -y $other_packages
+				fi
+				
+				# Install wireguard-tools without weak deps to avoid kernel modules
+				if [[ -n "$wireguard_tools_packages" ]]; then
+					yum install -y --setopt=install_weak_deps=0 $wireguard_tools_packages
+				fi
+				
+				install_boringtun "${os}"
+			else
+				yum install -y $packages
+			fi
+			;;
+		'oracle')
+			if [[ $boringtun == true ]]; then
+				# For BoringTun, install most packages normally, but wireguard-tools without weak deps
+				local wireguard_tools_packages=""
+				local other_packages=""
+				
+				# Separate wireguard-tools from other packages
+				for pkg in $packages; do
+					if [[ $pkg == "wireguard-tools" ]]; then
+						wireguard_tools_packages="$wireguard_tools_packages $pkg"
+					else
+						other_packages="$other_packages $pkg"
+					fi
+				done
+				
+				# Install other packages normally
+				if [[ -n "$other_packages" ]]; then
+					dnf install -y $other_packages
+				fi
+				
+				# Install wireguard-tools without weak deps to avoid kernel modules
+				if [[ -n "$wireguard_tools_packages" ]]; then
+					dnf install -y --setopt=install_weak_deps=0 $wireguard_tools_packages
+				fi
+				
+				install_boringtun "${os}"
+			else
+				dnf install -y $packages
+			fi
+			;;
+		'arch')
+			pacman -S --needed --noconfirm $packages
+			if [[ $boringtun == true ]]; then
+				install_boringtun "${os}"
+			fi
+			;;
+		'alpine')
+			apk update
+			apk add $packages
+			if [[ $boringtun == true ]]; then
+				install_boringtun "${os}"
+			fi
+			;;
+	esac
+}
+
+install_boringtun() {
+	local os=$1
+	
+	# Install Rust and Cargo (except for Arch which has it in repos)
+	if [[ $os != 'arch' ]]; then
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+		source ~/.cargo/env
+	fi
+	
+	# Install BoringTun via Cargo
+	cargo install boringtun-cli
+	
+	# Create symlink for wg command
+	ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
+}
+
+remove_packages() {
+	local os=$1
+	local packages=$2
+	
+	case $os in
+		'ubuntu'|'debian')
+			apt-get remove -y $packages
+			;;
+		'fedora')
+			dnf remove -y --noautoremove $packages
+			;;
+		'centos'|'almalinux'|'rocky'|'oracle')
+			yum remove -y --noautoremove $packages
+			;;
+		'arch')
+			pacman -Rs --noconfirm $packages
+			;;
+		'alpine')
+			apk del $packages
+			;;
+	esac
+}
+
 function installWireGuard() {
 	# Run setup questions first
 	installQuestions
@@ -447,68 +763,49 @@ function installWireGuard() {
 	# Check if we need to use BoringTun instead of WireGuard kernel module
 	if [[ ${LXC_HASWIREGUARD} == false ]]; then
 		echo ""
-		echo "WireGuard kernel module is not available in this LXC container."
-		echo "You can install BoringTun (userspace WireGuard implementation) instead."
+		highlight "WireGuard kernel module is not available in this LXC container."
+		warning "You can install BoringTun (userspace WireGuard implementation) instead."
 		echo ""
 		read -rp "Do you want to install BoringTun? [y/n]: " -e INSTALL_BORINGTUN
 		INSTALL_BORINGTUN=${INSTALL_BORINGTUN:-n}
 		if [[ $INSTALL_BORINGTUN != 'y' && $INSTALL_BORINGTUN != 'Y' ]]; then
-			echo "WireGuard kernel module is required. Exiting..."
+			error "WireGuard kernel module is required. Exiting..."
 			exit 1
 		fi
-		echo "Installing BoringTun instead of WireGuard kernel module..."
+		INSTALL_BORINGTUN="y"
+		success "Installing BoringTun instead of WireGuard kernel module..."
 	fi
 
 	# Install WireGuard tools and module
 	if [[ ${LXC_HASWIREGUARD} == false && ${INSTALL_BORINGTUN} == 'y' ]]; then
 		# Install BoringTun instead of WireGuard kernel module
-		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
-			apt-get update
-			apt-get install -y curl iptables resolvconf qrencode build-essential pkg-config libssl-dev wireguard-tools
-			# Install Rust and Cargo
-			curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-			source ~/.cargo/env
-			# Install BoringTun via Cargo
-			cargo install boringtun-cli
-			# Create symlink for wg command
-			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
-		elif [[ ${OS} == 'fedora' ]]; then
-			dnf install -y curl iptables qrencode gcc openssl-devel wireguard-tools
-			# Install Rust and Cargo
-			curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-			source ~/.cargo/env
-			# Install BoringTun via Cargo
-			cargo install boringtun-cli
-			# Create symlink for wg command
-			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
-		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
-			yum install -y curl iptables gcc openssl-devel wireguard-tools
-			# Install Rust and Cargo
-			curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-			source ~/.cargo/env
-			# Install BoringTun via Cargo
-			cargo install boringtun-cli
-			# Create symlink for wg command
-			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
-		elif [[ ${OS} == 'arch' ]]; then
-			pacman -S --needed --noconfirm curl qrencode rust wireguard-tools
-			# Install BoringTun via Cargo
-			cargo install boringtun-cli
-			# Create symlink for wg command
-			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
-		elif [[ ${OS} == 'alpine' ]]; then
-			apk update
-			apk add curl iptables libqrencode-tools rust cargo wireguard-tools
-			# Install BoringTun via Cargo
-			cargo install boringtun-cli
-			# Create symlink for wg command
-			ln -sf ~/.cargo/bin/boringtun /usr/local/bin/wg
-		fi
+		# Note: We need wireguard-tools for wg-quick script, but not the kernel module
+		case ${OS} in
+			'ubuntu'|'debian')
+				install_packages "${OS}" "curl iptables resolvconf qrencode build-essential pkg-config libssl-dev wireguard-tools" true
+				;;
+			'fedora')
+				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
+				;;
+			'centos'|'almalinux'|'rocky')
+				install_packages "${OS}" "curl iptables gcc openssl-devel wireguard-tools" true
+				;;
+			'oracle')
+				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
+				;;
+			'arch')
+				install_packages "${OS}" "curl qrencode rust wireguard-tools" true
+				;;
+			'alpine')
+				install_packages "${OS}" "curl iptables libqrencode-tools rust cargo wireguard-tools" true
+				;;
+		esac
+		
 		echo "BoringTun installed successfully."
 		
 		# Configure systemd service for BoringTun
 		if [[ ${OS} != 'alpine' ]]; then
-			sed -i "19 i Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=$HOME/.cargo/bin/boringtun-cli" /lib/systemd/system/wg-quick@.service
+			sed -i '19 i Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=boringtun' /lib/systemd/system/wg-quick@.service
 			sed -i '20 i Environment=WG_SUDO=1' /lib/systemd/system/wg-quick@.service
 			systemctl daemon-reload
 			echo "Systemd service configured for BoringTun."
@@ -520,46 +817,56 @@ function installWireGuard() {
 		echo "Environment variables set for BoringTun userspace implementation."
 	else
 		# Install regular WireGuard
-		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' && ${VERSION_ID} -gt 10 ]]; then
-			apt-get update
-			apt-get install -y wireguard iptables resolvconf qrencode
-		elif [[ ${OS} == 'debian' && ${VERSION_ID} == 10 ]]; then
-			if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
-				echo "deb http://deb.debian.org/debian buster-backports main" >/etc/apt/sources.list.d/backports.list
-				apt-get update
-			fi
-			apt update
-			apt-get install -y iptables resolvconf qrencode
-			apt-get install -y -t buster-backports wireguard
-		elif [[ ${OS} == 'debian' ]]; then
-			apt-get update
-			apt-get install -y wireguard iptables resolvconf qrencode
-		elif [[ ${OS} == 'fedora' ]]; then
-			if [[ ${VERSION_ID} -lt 32 ]]; then
-				dnf install -y dnf-plugins-core
-				dnf copr enable -y jdoss/wireguard
-				dnf install -y wireguard-dkms
-			fi
-			dnf install -y wireguard-tools iptables qrencode
-		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
-			if [[ ${VERSION_ID} == 8* ]]; then
-				yum install -y epel-release elrepo-release
-				yum install -y kmod-wireguard
-				yum install -y qrencode # not available on release 9
-			fi
-			yum install -y wireguard-tools iptables
-		elif [[ ${OS} == 'oracle' ]]; then
-			dnf install -y oraclelinux-developer-release-el8
-			dnf config-manager --disable -y ol8_developer
-			dnf config-manager --enable -y ol8_developer_UEKR6
-			dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'
-			dnf install -y wireguard-tools qrencode iptables
-		elif [[ ${OS} == 'arch' ]]; then
-			pacman -S --needed --noconfirm wireguard-tools qrencode
-		elif [[ ${OS} == 'alpine' ]]; then
-			apk update
-			apk add wireguard-tools iptables libqrencode-tools
-		fi
+		case ${OS} in
+			'ubuntu')
+				install_packages "${OS}" "wireguard iptables resolvconf qrencode"
+				;;
+			'debian')
+				if [[ ${VERSION_ID} == 10 ]]; then
+					# Debian 10 (Buster) needs backports for WireGuard
+					if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
+						echo "deb http://deb.debian.org/debian buster-backports main" >/etc/apt/sources.list.d/backports.list
+						apt-get update
+					fi
+					apt-get install -y iptables resolvconf qrencode
+					apt-get install -y -t buster-backports wireguard
+				else
+					install_packages "${OS}" "wireguard iptables resolvconf qrencode"
+				fi
+				;;
+			'fedora')
+				if [[ ${VERSION_ID} -lt 32 ]]; then
+					# Fedora < 32 needs COPR repository
+					dnf install -y dnf-plugins-core
+					dnf copr enable -y jdoss/wireguard
+					dnf install -y wireguard-dkms
+				fi
+				install_packages "${OS}" "wireguard-tools iptables qrencode"
+				;;
+			'centos'|'almalinux'|'rocky')
+				if [[ ${VERSION_ID} == 8* ]]; then
+					# CentOS 8 needs EPEL and ELRepo
+					yum install -y epel-release elrepo-release
+					yum install -y kmod-wireguard
+					yum install -y qrencode # not available on release 9
+				fi
+				install_packages "${OS}" "wireguard-tools iptables"
+				;;
+			'oracle')
+				# Oracle Linux 8 needs special repository configuration
+				dnf install -y oraclelinux-developer-release-el8
+				dnf config-manager --disable -y ol8_developer
+				dnf config-manager --enable -y ol8_developer_UEKR6
+				dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'
+				install_packages "${OS}" "wireguard-tools qrencode iptables"
+				;;
+			'arch')
+				install_packages "${OS}" "wireguard-tools qrencode"
+				;;
+			'alpine')
+				install_packages "${OS}" "wireguard-tools iptables libqrencode-tools"
+				;;
+		esac
 	fi
 
 	# Make sure the directory exists (this does not seem the be the case on fedora)
@@ -674,7 +981,6 @@ net.ipv6.conf.all.forwarding = 1"
 	fi
 
 	newClient
-	echo -e "${GREEN}If you want to add more clients, you simply need to run this script another time!${NC}"
 
 	# Check if WireGuard is running
 	if [[ ${OS} == 'alpine' ]]; then
@@ -738,7 +1044,7 @@ function newClient() {
 
 	if [[ ${DOT_EXISTS} == '1' ]]; then
 		echo ""
-		echo "The subnet configured supports only 253 clients."
+		highlight "The subnet configured supports only 253 clients."
 		exit 1
 	fi
 
@@ -874,30 +1180,36 @@ function uninstallWg() {
 			systemctl disable "wg-quick@${SERVER_WG_NIC}"
 		fi
 
-		if [[ ${OS} == 'ubuntu' ]]; then
-			apt-get remove -y wireguard wireguard-tools qrencode
-		elif [[ ${OS} == 'debian' ]]; then
-			apt-get remove -y wireguard wireguard-tools qrencode
-		elif [[ ${OS} == 'fedora' ]]; then
-			dnf remove -y --noautoremove wireguard-tools qrencode
-			if [[ ${VERSION_ID} -lt 32 ]]; then
-				dnf remove -y --noautoremove wireguard-dkms
-				dnf copr disable -y jdoss/wireguard
-			fi
-		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
-			yum remove -y --noautoremove wireguard-tools
-			if [[ ${VERSION_ID} == 8* ]]; then
-				yum remove --noautoremove kmod-wireguard qrencode
-			fi
-		elif [[ ${OS} == 'oracle' ]]; then
-			yum remove --noautoremove wireguard-tools qrencode
-		elif [[ ${OS} == 'arch' ]]; then
-			pacman -Rs --noconfirm wireguard-tools qrencode
-		elif [[ ${OS} == 'alpine' ]]; then
-			(cd qrencode-4.1.1 || exit && make uninstall)
-			rm -rf qrencode-* || exit
-			apk del wireguard-tools libqrencode libqrencode-tools
-		fi
+		case ${OS} in
+			'ubuntu'|'debian')
+				remove_packages "${OS}" "wireguard wireguard-tools qrencode"
+				;;
+			'fedora')
+				remove_packages "${OS}" "wireguard-tools qrencode"
+				if [[ ${VERSION_ID} -lt 32 ]]; then
+					dnf remove -y --noautoremove wireguard-dkms
+					dnf copr disable -y jdoss/wireguard
+				fi
+				;;
+			'centos'|'almalinux'|'rocky')
+				remove_packages "${OS}" "wireguard-tools"
+				if [[ ${VERSION_ID} == 8* ]]; then
+					yum remove --noautoremove kmod-wireguard qrencode
+				fi
+				;;
+			'oracle')
+				remove_packages "${OS}" "wireguard-tools qrencode"
+				;;
+			'arch')
+				remove_packages "${OS}" "wireguard-tools qrencode"
+				;;
+			'alpine')
+				# Alpine has special qrencode handling
+				(cd qrencode-4.1.1 || exit && make uninstall)
+				rm -rf qrencode-* || exit
+				remove_packages "${OS}" "wireguard-tools libqrencode libqrencode-tools"
+				;;
+		esac
 
 		rm -rf /etc/wireguard
 		rm -f /etc/sysctl.d/wg.conf
@@ -927,17 +1239,17 @@ function uninstallWg() {
 }
 
 function manageMenu() {
-	echo "Welcome to WireGuard-install!"
-	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
+	success "Welcome to WireGuard-install!"
+	info "The git repository is available at: https://github.com/angristan/wireguard-install"
 	echo ""
-	echo "It looks like WireGuard is already installed."
+	warning "It looks like WireGuard is already installed."
 	echo ""
-	echo "What do you want to do?"
-	echo "   1) Add a new user"
-	echo "   2) List all users"
-	echo "   3) Revoke existing user"
-	echo "   4) Uninstall WireGuard"
-	echo "   5) Exit"
+	info "What do you want to do?"
+	info "   1) Add a new user"
+	info "   2) List all users"
+	info "   3) Revoke existing user"
+	info "   4) Uninstall WireGuard"
+	info "   5) Exit"
 	until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
 		read -rp "Select an option [1-5]: " MENU_OPTION
 	done
@@ -966,7 +1278,9 @@ initialCheck
 # Check if WireGuard is already installed and load params
 if [[ -e /etc/wireguard/params ]]; then
 	source /etc/wireguard/params
-	manageMenu
 else
 	installWireGuard
 fi
+while true; do
+	manageMenu
+done
