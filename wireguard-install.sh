@@ -305,10 +305,16 @@ function getHomeDirForClient() {
 function initialCheck() {
 	isRoot
 	checkOS
-	checkVirt
+
 }
 
 function installQuestions() {
+	local IP_FAMILY
+	local EXTERNAL_IP
+	local DNS_CHOICE
+	local DNS_CONFIRM
+
+	checkVirt
 	success "Welcome to the WireGuard installer!"
 	info "The git repository is available at: https://github.com/angristan/wireguard-install"
 	echo ""
@@ -755,6 +761,7 @@ remove_packages() {
 }
 
 function installWireGuard() {
+
 	# Run setup questions first
 	installQuestions
 
@@ -990,6 +997,21 @@ net.ipv6.conf.all.forwarding = 1"
 }
 
 function newClient() {
+	local ENDPOINT
+	local CLIENT_NAME
+	local CLIENT_EXISTS
+	local DOT_IP
+	local DOT_EXISTS
+	local BASE_IP
+	local IPV4_EXISTS
+	local CLIENT_WG_IPV4
+	local IPV6_EXISTS
+	local CLIENT_WG_IPV6
+	local CLIENT_PRIV_KEY
+	local CLIENT_PUB_KEY
+	local CLIENT_PRE_SHARED_KEY
+	local HOME_DIR
+
 	# If SERVER_PUB_IP is IPv6, add brackets if missing
 	if [[ ${SERVER_PUB_IP} =~ .*:.* ]]; then
 		if [[ ${SERVER_PUB_IP} != *"["* ]] || [[ ${SERVER_PUB_IP} != *"]"* ]]; then
@@ -1097,6 +1119,8 @@ AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128" >>"/etc/wireguard/${SER
 }
 
 function listClients() {
+	local NUMBER_OF_CLIENTS
+
 	NUMBER_OF_CLIENTS=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 	if [[ ${NUMBER_OF_CLIENTS} -eq 0 ]]; then
 		echo ""
@@ -1108,6 +1132,11 @@ function listClients() {
 }
 
 function revokeClient() {
+	local NUMBER_OF_CLIENTS
+	local CLIENT_NUMBER
+	local CLIENT_NAME
+	local HOME_DIR
+
 	NUMBER_OF_CLIENTS=$(grep -c -E "^### Client" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 	if [[ ${NUMBER_OF_CLIENTS} == '0' ]]; then
 		echo ""
@@ -1141,6 +1170,9 @@ function revokeClient() {
 }
 
 function uninstallWg() {
+	local REMOVE
+	local WG_RUNNING
+
 	echo ""
 	echo -e "\n${RED}WARNING: This will uninstall WireGuard and remove all the configuration files!${NC}"
 	echo -e "${ORANGE}Please backup the /etc/wireguard directory if you want to keep your configuration files.\n${NC}"
@@ -1218,6 +1250,8 @@ function uninstallWg() {
 }
 
 function manageMenu() {
+	local MENU_OPTION
+
 	success "Welcome to WireGuard-install!"
 	info "The git repository is available at: https://github.com/angristan/wireguard-install"
 	echo ""
