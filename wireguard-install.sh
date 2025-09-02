@@ -737,7 +737,7 @@ function installWireGuard() {
 				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
 				;;
 			'centos'|'almalinux'|'rocky')
-				install_packages "${OS}" "curl iptables gcc openssl-devel wireguard-tools" true
+				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
 				;;
 			'oracle')
 				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
