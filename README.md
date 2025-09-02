@@ -20,11 +20,11 @@ Supported distributions:
 - Alpine Linux
 - Arch Linux
 - CentOS Stream >= 8
-- Debian >= 10
-- Fedora >= 32
-- Oracle Linux
+- Debian >= 11 (Bullseye)
+- Fedora >= 37
+- Oracle Linux >= 8
 - Rocky Linux >= 8
-- Ubuntu >= 18.04
+- Ubuntu >= 20.04 LTS
 
 ## Usage
 
