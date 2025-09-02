@@ -506,6 +506,12 @@ function installQuestions() {
 	SYSTEM_DNS_1=$(echo "$SYSTEM_DNS" | awk '{print $1}')
 	SYSTEM_DNS_2=$(echo "$SYSTEM_DNS" | awk '{print $2}')
 	
+	# Determine if system DNS is available and valid
+	SYSTEM_DNS_AVAILABLE=false
+	if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
+		SYSTEM_DNS_AVAILABLE=true
+	fi
+	
 	# DNS server selection
 	echo ""
 	echo "DNS server options:"
@@ -519,12 +525,6 @@ function installQuestions() {
 	echo "4) Quad9 DNS (9.9.9.9, 149.112.112.112)"
 	echo "5) Custom DNS servers"
 	echo ""
-	
-	# Determine if system DNS is available and valid
-	SYSTEM_DNS_AVAILABLE=false
-	if [[ -n "$SYSTEM_DNS_1" ]] && is_valid_ip "$SYSTEM_DNS_1"; then
-		SYSTEM_DNS_AVAILABLE=true
-	fi
 	
 	# Set DNS choices based on available IP families
 	if [[ ${HAS_IPV4} == true ]]; then
