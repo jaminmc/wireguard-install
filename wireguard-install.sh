@@ -447,23 +447,17 @@ function installQuestions() {
 	DEFAULT_IPV4="10.${RANDOM_IPV4_SECOND}.${RANDOM_IPV4_THIRD}.1"
 	DEFAULT_IPV6="fd42:${RANDOM_IPV4_SECOND}:${RANDOM_IPV4_THIRD}::1"
 
-	# Only prompt for IPv4 if the server has IPv4
-	if [[ ${HAS_IPV4} == true ]]; then
-		until is_valid_ip "${SERVER_WG_IPV4}" && [[ ${SERVER_WG_IPV4} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; do
-			read -rp "Server WireGuard IPv4: " -e -i "${DEFAULT_IPV4}" SERVER_WG_IPV4
-		done
-	else
-		SERVER_WG_IPV4=""
-	fi
+	# Always prompt for IPv4 to prevent VPN leaks (even if server doesn't have IPv4)
+	# This ensures clients are always routed through the VPN for IPv4 traffic
+	until is_valid_ip "${SERVER_WG_IPV4}" && [[ ${SERVER_WG_IPV4} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; do
+		read -rp "Server WireGuard IPv4: " -e -i "${DEFAULT_IPV4}" SERVER_WG_IPV4
+	done
 
-	# Only prompt for IPv6 if the server has IPv6
-	if [[ ${HAS_IPV6} == true ]]; then
-		until is_valid_ip "${SERVER_WG_IPV6}" && [[ ${SERVER_WG_IPV6} =~ .*:.* ]]; do
-			read -rp "Server WireGuard IPv6: " -e -i "${DEFAULT_IPV6}" SERVER_WG_IPV6
-		done
-	else
-		SERVER_WG_IPV6=""
-	fi
+	# Always prompt for IPv6 to prevent VPN leaks (even if server doesn't have IPv6)
+	# This ensures clients are always routed through the VPN for IPv6 traffic
+	until is_valid_ip "${SERVER_WG_IPV6}" && [[ ${SERVER_WG_IPV6} =~ .*:.* ]]; do
+		read -rp "Server WireGuard IPv6: " -e -i "${DEFAULT_IPV6}" SERVER_WG_IPV6
+	done
 
 	# Generate random number within private ports range
 	RANDOM_PORT=$(shuf -i49152-65535 -n1)
@@ -583,14 +577,9 @@ function installQuestions() {
 		echo "Updated DNS servers: $CLIENT_DNS_1${CLIENT_DNS_2:+ and $CLIENT_DNS_2}"
 	fi
 
-	# Set default ALLOWED_IPS based on available IP families
-	if [[ ${HAS_IPV4} == true && ${HAS_IPV6} == true ]]; then
-		DEFAULT_ALLOWED_IPS="0.0.0.0/0,::/0"
-	elif [[ ${HAS_IPV4} == true ]]; then
-		DEFAULT_ALLOWED_IPS="0.0.0.0/0"
-	else
-		DEFAULT_ALLOWED_IPS="::/0"
-	fi
+	# Always set default ALLOWED_IPS to include both IPv4 and IPv6 to prevent VPN leaks
+	# This ensures all client traffic (both IPv4 and IPv6) is routed through the VPN
+	DEFAULT_ALLOWED_IPS="0.0.0.0/0,::/0"
 	
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
@@ -899,18 +888,8 @@ CLIENT_DNS_1=${CLIENT_DNS_1}
 CLIENT_DNS_2=${CLIENT_DNS_2}
 ALLOWED_IPS=${ALLOWED_IPS}" >/etc/wireguard/params
 
-	# Build address string based on available IP families
-	ADDRESS_STRING=""
-	if [[ ${HAS_IPV4} == true ]]; then
-		ADDRESS_STRING="${SERVER_WG_IPV4}/24"
-	fi
-	if [[ ${HAS_IPV6} == true ]]; then
-		if [[ -n ${ADDRESS_STRING} ]]; then
-			ADDRESS_STRING="${ADDRESS_STRING},${SERVER_WG_IPV6}/64"
-		else
-			ADDRESS_STRING="${SERVER_WG_IPV6}/64"
-		fi
-	fi
+	# Always build address string with both IPv4 and IPv6 to prevent VPN leaks
+	ADDRESS_STRING="${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64"
 
 	# Add server interface
 	echo "[Interface]
@@ -933,29 +912,20 @@ PostDown = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewa
 		IPV4_INTERFACE="${SERVER_NIC_V4:-${SERVER_PUB_NIC}}"
 		IPV6_INTERFACE="${SERVER_NIC_V6:-${SERVER_PUB_NIC}}"
 		
-		# Build PostUp/PostDown rules based on available IP families
-		POSTUP_RULES="PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT"
-		POSTDOWN_RULES="PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT"
-		
-		if [[ ${HAS_IPV4} == true ]]; then
-			POSTUP_RULES="${POSTUP_RULES}
+		# Always build PostUp/PostDown rules for both IPv4 and IPv6 to prevent VPN leaks
+		POSTUP_RULES="PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
 PostUp = iptables -I FORWARD -i ${IPV4_INTERFACE} -o ${SERVER_WG_NIC} -j ACCEPT
 PostUp = iptables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostUp = iptables -t nat -A POSTROUTING -o ${IPV4_INTERFACE} -j MASQUERADE"
-			POSTDOWN_RULES="${POSTDOWN_RULES}
-PostDown = iptables -D FORWARD -i ${IPV4_INTERFACE} -o ${SERVER_WG_NIC} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -o ${IPV4_INTERFACE} -j MASQUERADE"
-		fi
-		
-		if [[ ${HAS_IPV6} == true ]]; then
-			POSTUP_RULES="${POSTUP_RULES}
+PostUp = iptables -t nat -A POSTROUTING -o ${IPV4_INTERFACE} -j MASQUERADE
 PostUp = ip6tables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
 PostUp = ip6tables -t nat -A POSTROUTING -o ${IPV6_INTERFACE} -j MASQUERADE"
-			POSTDOWN_RULES="${POSTDOWN_RULES}
+		
+		POSTDOWN_RULES="PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
+PostDown = iptables -D FORWARD -i ${IPV4_INTERFACE} -o ${SERVER_WG_NIC} -j ACCEPT
+PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o ${IPV4_INTERFACE} -j MASQUERADE
 PostDown = ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
 PostDown = ip6tables -t nat -D POSTROUTING -o ${IPV6_INTERFACE} -j MASQUERADE"
-		fi
 		
 		echo "${POSTUP_RULES}
 ${POSTDOWN_RULES}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
