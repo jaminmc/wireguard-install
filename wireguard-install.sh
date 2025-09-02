@@ -82,6 +82,36 @@ function checkVirt() {
 				highlight "Warning: WireGuard kernel module is not available or functional in this LXC container."
 				warning "You can install BoringTun (userspace WireGuard implementation) instead."
 				LXC_HASWIREGUARD=false
+				
+				# Check if TUN device is available (required for BoringTun)
+				if [[ ! -e /dev/net/tun ]]; then
+					echo ""
+					error "TUN device (/dev/net/tun) is not available."
+					echo ""
+					warning "BoringTun requires a TUN device to function. This device is typically:"
+					warning "  - Created by the 'tun' kernel module"
+					warning "  - Available in most VPS environments"
+					warning "  - Required for userspace VPN implementations"
+					echo ""
+					info "To enable the TUN device, you can try:"
+					info "  1. Load the tun module: modprobe tun"
+					info "  2. Check if it's available: ls -la /dev/net/tun"
+					info "  3. If the module doesn't exist, contact your hosting provider"
+					echo ""
+					error "Cannot proceed without TUN device. Exiting..."
+					exit 1
+				fi
+				
+				success "TUN device is available. BoringTun can be installed."
+				echo ""
+				read -rp "Do you want to install BoringTun? [y/n]: " -e INSTALL_BORINGTUN
+				INSTALL_BORINGTUN=${INSTALL_BORINGTUN:-n}
+				if [[ $INSTALL_BORINGTUN != 'y' && $INSTALL_BORINGTUN != 'Y' ]]; then
+					error "WireGuard kernel module is required. Exiting..."
+					exit 1
+				fi
+				INSTALL_BORINGTUN="y"
+				success "BoringTun will be installed instead of WireGuard kernel module..."
 			fi
 		fi
 	}
@@ -517,7 +547,7 @@ function installQuestions() {
 	# DNS selection
 	until [[ ${DNS_CHOICE} =~ ^[1-5]$ ]]; do
 		if [[ ${SYSTEM_DNS_AVAILABLE} == true ]]; then
-			read -rp "Select DNS option [1-5]: " -e -i "1" DNS_CHOICE
+			read -rp "Select DNS option [1-5]: " -e -i "2" DNS_CHOICE
 		else
 			read -rp "Select DNS option [2-5]: " -e -i "2" DNS_CHOICE
 		fi
@@ -695,38 +725,6 @@ function installWireGuard() {
 
 	# Check if we need to use BoringTun instead of WireGuard kernel module
 	if [[ ${LXC_HASWIREGUARD} == false ]]; then
-		echo ""
-		highlight "WireGuard kernel module is not available in this LXC container."
-		warning "You can install BoringTun (userspace WireGuard implementation) instead."
-		echo ""
-		
-		# Check if TUN device is available (required for BoringTun)
-		if [[ ! -e /dev/net/tun ]]; then
-			error "TUN device (/dev/net/tun) is not available."
-			echo ""
-			warning "BoringTun requires a TUN device to function. This device is typically:"
-			warning "  - Created by the 'tun' kernel module"
-			warning "  - Available in most VPS environments"
-			warning "  - Required for userspace VPN implementations"
-			echo ""
-			info "To enable the TUN device, you can try:"
-			info "  1. Load the tun module: modprobe tun"
-			info "  2. Check if it's available: ls -la /dev/net/tun"
-			info "  3. If the module doesn't exist, contact your hosting provider"
-			echo ""
-			error "Cannot proceed without TUN device. Exiting..."
-			exit 1
-		fi
-		
-		success "TUN device is available. Proceeding with BoringTun installation..."
-		echo ""
-		read -rp "Do you want to install BoringTun? [y/n]: " -e INSTALL_BORINGTUN
-		INSTALL_BORINGTUN=${INSTALL_BORINGTUN:-n}
-		if [[ $INSTALL_BORINGTUN != 'y' && $INSTALL_BORINGTUN != 'Y' ]]; then
-			error "WireGuard kernel module is required. Exiting..."
-			exit 1
-		fi
-		INSTALL_BORINGTUN="y"
 		success "Installing BoringTun instead of WireGuard kernel module..."
 	fi
 
