@@ -637,46 +637,125 @@ install_packages() {
 	local packages=$2
 	local boringtun=${3:-false}
 	
+	info "Installing packages for ${os}: ${packages}"
+	
 	case $os in
 		'ubuntu'|'debian')
-			apt-get update
-			apt-get install -y $packages
+			info "Updating package lists..."
+			if ! apt-get update; then
+				error "Failed to update package lists for ${os}"
+				return 1
+			fi
+			
+			info "Installing packages: ${packages}"
+			if ! apt-get install -y $packages; then
+				error "Failed to install packages: ${packages}"
+				error "Please check your internet connection and package repositories"
+				return 1
+			fi
+			
 			if [[ $boringtun == true ]]; then
-				install_boringtun "${os}"
+				info "Installing BoringTun for ${os}..."
+				if ! install_boringtun "${os}"; then
+					error "Failed to install BoringTun"
+					return 1
+				fi
 			fi
 			;;
 		'fedora')
-			dnf install -y $packages
+			info "Installing packages: ${packages}"
+			if ! dnf install -y $packages; then
+				error "Failed to install packages: ${packages}"
+				error "Please check your internet connection and package repositories"
+				return 1
+			fi
+			
 			if [[ $boringtun == true ]]; then
-				install_boringtun "${os}"
+				info "Installing BoringTun for ${os}..."
+				if ! install_boringtun "${os}"; then
+					error "Failed to install BoringTun"
+					return 1
+				fi
 			fi
 			;;
 		'centos'|'almalinux'|'rocky')
-			yum install -y $packages
+			info "Installing packages: ${packages}"
+			if ! yum install -y $packages; then
+				error "Failed to install packages: ${packages}"
+				error "Please check your internet connection and package repositories"
+				return 1
+			fi
+			
 			if [[ $boringtun == true ]]; then
-				install_boringtun "${os}"
+				info "Installing BoringTun for ${os}..."
+				if ! install_boringtun "${os}"; then
+					error "Failed to install BoringTun"
+					return 1
+				fi
 			fi
 			;;
 		'oracle')
-			dnf install -y $packages
+			info "Installing packages: ${packages}"
+			if ! dnf install -y $packages; then
+				error "Failed to install packages: ${packages}"
+				error "Please check your internet connection and package repositories"
+				return 1
+			fi
+			
 			if [[ $boringtun == true ]]; then
-				install_boringtun "${os}"
+				info "Installing BoringTun for ${os}..."
+				if ! install_boringtun "${os}"; then
+					error "Failed to install BoringTun"
+					return 1
+				fi
 			fi
 			;;
 		'arch')
-			pacman -S --needed --noconfirm $packages
+			info "Installing packages: ${packages}"
+			if ! pacman -S --needed --noconfirm $packages; then
+				error "Failed to install packages: ${packages}"
+				error "Please check your internet connection and package repositories"
+				return 1
+			fi
+			
 			if [[ $boringtun == true ]]; then
-				install_boringtun "${os}"
+				info "Installing BoringTun for ${os}..."
+				if ! install_boringtun "${os}"; then
+					error "Failed to install BoringTun"
+					return 1
+				fi
 			fi
 			;;
 		'alpine')
-			apk update
-			apk add $packages
+			info "Updating package lists..."
+			if ! apk update; then
+				error "Failed to update package lists for ${os}"
+				return 1
+			fi
+			
+			info "Installing packages: ${packages}"
+			if ! apk add $packages; then
+				error "Failed to install packages: ${packages}"
+				error "Please check your internet connection and package repositories"
+				return 1
+			fi
+			
 			if [[ $boringtun == true ]]; then
-				install_boringtun "${os}"
+				info "Installing BoringTun for ${os}..."
+				if ! install_boringtun "${os}"; then
+					error "Failed to install BoringTun"
+					return 1
+				fi
 			fi
 			;;
+		*)
+			error "Unsupported operating system: ${os}"
+			return 1
+			;;
 	esac
+	
+	success "Package installation completed successfully for ${os}"
+	return 0
 }
 
 install_boringtun() {
@@ -684,35 +763,77 @@ install_boringtun() {
 	
 	# Install Rust and Cargo (except for Arch which has it in repos)
 	if [[ $os != 'arch' ]]; then
-		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-		source ~/.cargo/env
+		info "Installing Rust and Cargo..."
+		if ! curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; then
+			error "Failed to install Rust and Cargo"
+			error "Please check your internet connection and try again"
+			return 1
+		fi
+		
+		info "Sourcing Rust environment..."
+		if ! source ~/.cargo/env; then
+			error "Failed to source Rust environment"
+			return 1
+		fi
 	fi
 	
 	# Install BoringTun via Cargo directly to /usr/local
-	cargo install --root /usr/local boringtun-cli
+	info "Installing BoringTun via Cargo..."
+	if ! cargo install --root /usr/local boringtun-cli; then
+		error "Failed to install BoringTun via Cargo"
+		error "Please check your internet connection and Rust installation"
+		return 1
+	fi
+	
+	success "BoringTun installed successfully to /usr/local/bin/boringtun-cli"
+	return 0
 }
 
 remove_packages() {
 	local os=$1
 	local packages=$2
 	
+	info "Removing packages for ${os}: ${packages}"
+	
 	case $os in
 		'ubuntu'|'debian')
-			apt-get remove -y $packages
+			if ! apt-get remove -y $packages; then
+				error "Failed to remove packages: ${packages}"
+				return 1
+			fi
 			;;
 		'fedora')
-			dnf remove -y --noautoremove $packages
+			if ! dnf remove -y --noautoremove $packages; then
+				error "Failed to remove packages: ${packages}"
+				return 1
+			fi
 			;;
 		'centos'|'almalinux'|'rocky'|'oracle')
-			yum remove -y --noautoremove $packages
+			if ! yum remove -y --noautoremove $packages; then
+				error "Failed to remove packages: ${packages}"
+				return 1
+			fi
 			;;
 		'arch')
-			pacman -Rs --noconfirm $packages
+			if ! pacman -Rs --noconfirm $packages; then
+				error "Failed to remove packages: ${packages}"
+				return 1
+			fi
 			;;
 		'alpine')
-			apk del $packages
+			if ! apk del $packages; then
+				error "Failed to remove packages: ${packages}"
+				return 1
+			fi
+			;;
+		*)
+			error "Unsupported operating system: ${os}"
+			return 1
 			;;
 	esac
+	
+	success "Package removal completed successfully for ${os}"
+	return 0
 }
 
 function installWireGuard() {
@@ -731,26 +852,44 @@ function installWireGuard() {
 		# Note: We need wireguard-tools for wg-quick script, but not the kernel module
 		case ${OS} in
 			'ubuntu'|'debian')
-				install_packages "${OS}" "curl iptables resolvconf qrencode build-essential pkg-config libssl-dev wireguard-tools" true
+				if ! install_packages "${OS}" "curl iptables resolvconf qrencode build-essential pkg-config libssl-dev wireguard-tools" true; then
+					error "Failed to install packages for BoringTun on ${OS}"
+					exit 1
+				fi
 				;;
 			'fedora')
-				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
+				if ! install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true; then
+					error "Failed to install packages for BoringTun on ${OS}"
+					exit 1
+				fi
 				;;
 			'centos'|'almalinux'|'rocky')
-				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
+				if ! install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true; then
+					error "Failed to install packages for BoringTun on ${OS}"
+					exit 1
+				fi
 				;;
 			'oracle')
-				install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true
+				if ! install_packages "${OS}" "curl iptables qrencode gcc openssl-devel wireguard-tools" true; then
+					error "Failed to install packages for BoringTun on ${OS}"
+					exit 1
+				fi
 				;;
 			'arch')
-				install_packages "${OS}" "curl qrencode rust wireguard-tools" true
+				if ! install_packages "${OS}" "curl qrencode rust wireguard-tools" true; then
+					error "Failed to install packages for BoringTun on ${OS}"
+					exit 1
+				fi
 				;;
 			'alpine')
-				install_packages "${OS}" "curl iptables libqrencode-tools rust cargo wireguard-tools" true
+				if ! install_packages "${OS}" "curl iptables libqrencode-tools rust cargo wireguard-tools" true; then
+					error "Failed to install packages for BoringTun on ${OS}"
+					exit 1
+				fi
 				;;
 		esac
 		
-		echo "BoringTun installed successfully."
+		success "BoringTun packages installed successfully."
 		
 		# Configure systemd service for BoringTun
 		if [[ ${OS} != 'alpine' ]]; then
@@ -768,33 +907,74 @@ function installWireGuard() {
 		# Install regular WireGuard
 		case ${OS} in
 			'ubuntu'|'debian')
-				install_packages "${OS}" "wireguard iptables resolvconf qrencode"
+				if ! install_packages "${OS}" "wireguard iptables resolvconf qrencode"; then
+					error "Failed to install WireGuard packages on ${OS}"
+					exit 1
+				fi
 				;;
 			'fedora')
-				install_packages "${OS}" "wireguard-tools iptables qrencode"
+				if ! install_packages "${OS}" "wireguard-tools iptables qrencode"; then
+					error "Failed to install WireGuard packages on ${OS}"
+					exit 1
+				fi
 				;;
 			'centos'|'almalinux'|'rocky')
 				if [[ ${VERSION_ID} == 8* ]]; then
 					# CentOS 8 needs EPEL and ELRepo
-					yum install -y epel-release elrepo-release
-					yum install -y kmod-wireguard
-					yum install -y qrencode # not available on release 9
+					info "Installing EPEL and ELRepo for CentOS 8..."
+					if ! yum install -y epel-release elrepo-release; then
+						error "Failed to install EPEL and ELRepo repositories"
+						exit 1
+					fi
+					if ! yum install -y kmod-wireguard; then
+						error "Failed to install WireGuard kernel module"
+						exit 1
+					fi
+					if ! yum install -y qrencode; then
+						error "Failed to install qrencode (not available on release 9)"
+						exit 1
+					fi
 				fi
-				install_packages "${OS}" "wireguard-tools iptables"
+				if ! install_packages "${OS}" "wireguard-tools iptables"; then
+					error "Failed to install WireGuard packages on ${OS}"
+					exit 1
+				fi
 				;;
 			'oracle')
 				# Oracle Linux 8 needs special repository configuration
-				dnf install -y oraclelinux-developer-release-el8
-				dnf config-manager --disable -y ol8_developer
-				dnf config-manager --enable -y ol8_developer_UEKR6
-				dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'
-				install_packages "${OS}" "wireguard-tools qrencode iptables"
+				info "Configuring Oracle Linux repositories..."
+				if ! dnf install -y oraclelinux-developer-release-el8; then
+					error "Failed to install Oracle Linux developer release"
+					exit 1
+				fi
+				if ! dnf config-manager --disable -y ol8_developer; then
+					error "Failed to disable ol8_developer repository"
+					exit 1
+				fi
+				if ! dnf config-manager --enable -y ol8_developer_UEKR6; then
+					error "Failed to enable ol8_developer_UEKR6 repository"
+					exit 1
+				fi
+				if ! dnf config-manager --save -y --setopt=ol8_developer_UEKR6.includepkgs='wireguard-tools*'; then
+					error "Failed to configure repository package inclusion"
+					exit 1
+				fi
+				if ! install_packages "${OS}" "wireguard-tools qrencode iptables"; then
+					error "Failed to install WireGuard packages on ${OS}"
+					exit 1
+				fi
 				;;
 			'arch')
-				install_packages "${OS}" "wireguard-tools qrencode"
+				if ! install_packages "${OS}" "wireguard-tools qrencode"; then
+					error "Failed to install WireGuard packages on ${OS}"
+					exit 1
+				fi
 				;;
 			'alpine')
-				install_packages "${OS}" "wireguard-tools iptables libqrencode-tools"
+				if ! install_packages "${OS}" "wireguard-tools iptables libqrencode-tools"; then
+					error "Failed to install WireGuard packages on ${OS}"
+					exit 1
+				fi
 				;;
 		esac
 	fi
