@@ -198,6 +198,38 @@ function initialCheck() {
 	checkVirt
 }
 
+function detectIPStack() {
+	# Detect whether the server has usable IPv4 and/or IPv6 connectivity.
+	# We treat a family as "available" if there is either a default route or a global address.
+	#
+	# This is intentionally conservative: it avoids generating config/rules for families that
+	# clearly don't exist (e.g., IPv6-only servers, IPv4-only networks).
+	IPV4_AVAILABLE=0
+	IPV6_AVAILABLE=0
+	CLAT_PRESENT=0
+
+	if ip -4 route ls default 2>/dev/null | grep -q '^default'; then
+		IPV4_AVAILABLE=1
+	elif ip -4 addr show scope global 2>/dev/null | grep -q ' inet '; then
+		IPV4_AVAILABLE=1
+	fi
+
+	if ip -6 route ls default 2>/dev/null | grep -q '^default'; then
+		IPV6_AVAILABLE=1
+	elif ip -6 addr show scope global 2>/dev/null | grep -q ' inet6 '; then
+		IPV6_AVAILABLE=1
+	fi
+
+	# 464XLAT/CLAT: on IPv6-only hosts, IPv4 functionality can be provided via a clat* interface.
+	# In that scenario, we still want to generate dual-stack tunnel addressing by default.
+	if ip link show 2>/dev/null | grep -qE '^[0-9]+: clat'; then
+		CLAT_PRESENT=1
+		if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			IPV4_AVAILABLE=1
+		fi
+	fi
+}
+
 function installQuestions() {
 	echo "Welcome to the WireGuard installer!"
 	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
@@ -206,31 +238,84 @@ function installQuestions() {
 	echo "You can keep the default options and just press enter if you are ok with them."
 	echo ""
 
-	# Detect public IPv4 or IPv6 address and pre-fill for the user
-	SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
-	if [[ -z ${SERVER_PUB_IP} ]]; then
-		# Detect public IPv6 address
-		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
+	detectIPStack
+	if [[ ${IPV4_AVAILABLE} -eq 0 && ${IPV6_AVAILABLE} -eq 0 ]]; then
+		echo -e "${RED}No IPv4 or IPv6 connectivity detected.${NC}"
+		echo "This installer requires at least one IP family to be available on the server."
+		exit 1
+	fi
+
+	# Detect default route interfaces (IPv4 and IPv6 can differ)
+	SERVER_NIC4="$(ip -4 route ls default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
+	SERVER_NIC6="$(ip -6 route ls default 2>/dev/null | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
+
+	# Detect public IP address and pre-fill for the user.
+	#
+	# If IPv4's default route goes through a 464XLAT interface (clat*), prefer IPv6
+	# as the server is typically IPv6-only and CLAT provides IPv4 functionality.
+	if [[ ${IPV6_AVAILABLE} -eq 1 && -n ${SERVER_NIC4} && ${SERVER_NIC4} == clat* ]]; then
+		SERVER_PUB_IP="$(ip -6 addr show ${SERVER_NIC6:+dev "${SERVER_NIC6}"} scope global 2>/dev/null | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)"
+		if [[ -z ${SERVER_PUB_IP} ]]; then
+			SERVER_PUB_IP="$(ip -6 addr show scope global 2>/dev/null | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)"
+		fi
+	else
+		if [[ ${IPV4_AVAILABLE} -eq 1 ]]; then
+			SERVER_PUB_IP="$(ip -4 addr show ${SERVER_NIC4:+dev "${SERVER_NIC4}"} scope global 2>/dev/null | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)"
+		fi
+		if [[ -z ${SERVER_PUB_IP} && ${IPV6_AVAILABLE} -eq 1 ]]; then
+			SERVER_PUB_IP="$(ip -6 addr show ${SERVER_NIC6:+dev "${SERVER_NIC6}"} scope global 2>/dev/null | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)"
+		fi
 	fi
 	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
 
-	# Detect public interface and pre-fill for the user
-	SERVER_NIC="$(ip -4 route ls | grep default | awk '/dev/ {for (i=1; i<=NF; i++) if ($i == "dev") print $(i+1)}' | head -1)"
-	until [[ ${SERVER_PUB_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
-		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
-	done
+	# Backwards-compatible single NIC var used across the script
+	# plus separate NICs used for v4/v6-specific firewall rules.
+	if [[ ${IPV4_AVAILABLE} -eq 1 && ${IPV6_AVAILABLE} -eq 1 && -n ${SERVER_NIC4} && -n ${SERVER_NIC6} && ${SERVER_NIC4} != "${SERVER_NIC6}" ]]; then
+		until [[ ${SERVER_PUB_NIC4} =~ ^[a-zA-Z0-9_]+$ ]]; do
+			read -rp "Public interface for IPv4 (default route): " -e -i "${SERVER_NIC4}" SERVER_PUB_NIC4
+		done
+		until [[ ${SERVER_PUB_NIC6} =~ ^[a-zA-Z0-9_]+$ ]]; do
+			read -rp "Public interface for IPv6 (default route): " -e -i "${SERVER_NIC6}" SERVER_PUB_NIC6
+		done
+		# Keep legacy variable populated for other uses.
+		# On IPv6-only + 464XLAT (clat*), prefer the IPv6 egress interface as "public".
+		if [[ -n ${SERVER_NIC4} && ${SERVER_NIC4} == clat* ]]; then
+			SERVER_PUB_NIC=${SERVER_PUB_NIC6}
+		else
+			SERVER_PUB_NIC=${SERVER_PUB_NIC4}
+		fi
+	else
+		SERVER_NIC="${SERVER_NIC4:-${SERVER_NIC6}}"
+		until [[ ${SERVER_PUB_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
+			read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
+		done
+		if [[ ${IPV4_AVAILABLE} -eq 1 ]]; then
+			SERVER_PUB_NIC4=${SERVER_PUB_NIC}
+		fi
+		if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			SERVER_PUB_NIC6=${SERVER_PUB_NIC}
+		fi
+	fi
 
 	until [[ ${SERVER_WG_NIC} =~ ^[a-zA-Z0-9_]+$ && ${#SERVER_WG_NIC} -lt 16 ]]; do
 		read -rp "WireGuard interface name: " -e -i wg0 SERVER_WG_NIC
 	done
 
-	until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
-		read -rp "Server WireGuard IPv4: " -e -i 10.66.66.1 SERVER_WG_IPV4
-	done
+	if [[ ${IPV4_AVAILABLE} -eq 1 ]]; then
+		until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
+			read -rp "Server WireGuard IPv4: " -e -i 10.66.66.1 SERVER_WG_IPV4
+		done
+	else
+		SERVER_WG_IPV4=""
+	fi
 
-	until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
-		read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
-	done
+	if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+		until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
+			read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
+		done
+	else
+		SERVER_WG_IPV6=""
+	fi
 
 	# Generate random number within private ports range
 	RANDOM_PORT=$(shuf -i49152-65535 -n1)
@@ -251,9 +336,37 @@ function installQuestions() {
 
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
-		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i '0.0.0.0/0,::/0' ALLOWED_IPS
+		# Default behavior:
+		# - Dual-stack servers: full-tunnel both IPv4 + IPv6 (no extra menu)
+		# - Single-stack servers: ask whether to full-tunnel (default) or only route the VPN subnet
+		if [[ ${IPV4_AVAILABLE} -eq 1 && ${IPV6_AVAILABLE} -eq 1 ]]; then
+			CLIENT_ROUTE_IPV4=1
+			CLIENT_ROUTE_IPV6=1
+			DEFAULT_ALLOWED_IPS='0.0.0.0/0,::/0'
+		elif [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			CLIENT_ROUTE_IPV4=0
+			CLIENT_ROUTE_IPV6=1
+			read -rp "Route all IPv6 traffic through the VPN? [Y/n]: " -e CLIENT_FULL_TUNNEL
+			CLIENT_FULL_TUNNEL=${CLIENT_FULL_TUNNEL:-Y}
+			if [[ ${CLIENT_FULL_TUNNEL} =~ ^[Nn]$ ]]; then
+				DEFAULT_ALLOWED_IPS="${SERVER_WG_IPV6}/64"
+			else
+				DEFAULT_ALLOWED_IPS='::/0'
+			fi
+		else
+			CLIENT_ROUTE_IPV4=1
+			CLIENT_ROUTE_IPV6=0
+			read -rp "Route all IPv4 traffic through the VPN? [Y/n]: " -e CLIENT_FULL_TUNNEL
+			CLIENT_FULL_TUNNEL=${CLIENT_FULL_TUNNEL:-Y}
+			if [[ ${CLIENT_FULL_TUNNEL} =~ ^[Nn]$ ]]; then
+				DEFAULT_ALLOWED_IPS="$(echo "${SERVER_WG_IPV4}" | cut -d"." -f1-3).0/24"
+			else
+				DEFAULT_ALLOWED_IPS='0.0.0.0/0'
+			fi
+		fi
+		read -rp "Allowed IPs list for generated clients (leave default to route everything): " -e -i "${DEFAULT_ALLOWED_IPS}" ALLOWED_IPS
 		if [[ ${ALLOWED_IPS} == "" ]]; then
-			ALLOWED_IPS="0.0.0.0/0,::/0"
+			ALLOWED_IPS="${DEFAULT_ALLOWED_IPS}"
 		fi
 	done
 
@@ -368,9 +481,16 @@ function installWireGuard() {
 	# Save WireGuard settings
 	echo "SERVER_PUB_IP=${SERVER_PUB_IP}
 SERVER_PUB_NIC=${SERVER_PUB_NIC}
+SERVER_PUB_NIC4=${SERVER_PUB_NIC4}
+SERVER_PUB_NIC6=${SERVER_PUB_NIC6}
 SERVER_WG_NIC=${SERVER_WG_NIC}
 SERVER_WG_IPV4=${SERVER_WG_IPV4}
 SERVER_WG_IPV6=${SERVER_WG_IPV6}
+IPV4_AVAILABLE=${IPV4_AVAILABLE}
+IPV6_AVAILABLE=${IPV6_AVAILABLE}
+CLAT_PRESENT=${CLAT_PRESENT}
+CLIENT_ROUTE_IPV4=${CLIENT_ROUTE_IPV4}
+CLIENT_ROUTE_IPV6=${CLIENT_ROUTE_IPV6}
 SERVER_PORT=${SERVER_PORT}
 SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
 SERVER_PUB_KEY=${SERVER_PUB_KEY}
@@ -379,34 +499,63 @@ CLIENT_DNS_2=${CLIENT_DNS_2}
 ALLOWED_IPS=${ALLOWED_IPS}" >/etc/wireguard/params
 
 	# Add server interface
-	echo "[Interface]
-Address = ${SERVER_WG_IPV4}/24,${SERVER_WG_IPV6}/64
-ListenPort = ${SERVER_PORT}
-PrivateKey = ${SERVER_PRIV_KEY}" >"/etc/wireguard/${SERVER_WG_NIC}.conf"
+	{
+		echo "[Interface]"
+		if [[ -n ${SERVER_WG_IPV4} ]]; then
+			echo "Address = ${SERVER_WG_IPV4}/24"
+		fi
+		if [[ -n ${SERVER_WG_IPV6} ]]; then
+			echo "Address = ${SERVER_WG_IPV6}/64"
+		fi
+		echo "ListenPort = ${SERVER_PORT}"
+		echo "PrivateKey = ${SERVER_PRIV_KEY}"
+	} >"/etc/wireguard/${SERVER_WG_NIC}.conf"
 
 	if pgrep firewalld; then
-		FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_WG_IPV4}" | cut -d"." -f1-3)".0"
-		FIREWALLD_IPV6_ADDRESS=$(echo "${SERVER_WG_IPV6}" | sed 's/:[^:]*$/:0/')
-		echo "PostUp = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewall-cmd --add-port ${SERVER_PORT}/udp && firewall-cmd --add-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade' && firewall-cmd --add-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/24 masquerade'
-PostDown = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewall-cmd --remove-port ${SERVER_PORT}/udp && firewall-cmd --remove-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade' && firewall-cmd --remove-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/24 masquerade'" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+		FIREWALLD_RULES="PostUp = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewall-cmd --add-port ${SERVER_PORT}/udp"
+		FIREWALLD_RULES_DOWN="PostDown = firewall-cmd --zone=public --add-interface=${SERVER_WG_NIC} && firewall-cmd --remove-port ${SERVER_PORT}/udp"
+		if [[ -n ${SERVER_WG_IPV4} ]]; then
+			FIREWALLD_IPV4_ADDRESS=$(echo "${SERVER_WG_IPV4}" | cut -d"." -f1-3)".0"
+			FIREWALLD_RULES="${FIREWALLD_RULES} && firewall-cmd --add-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade'"
+			FIREWALLD_RULES_DOWN="${FIREWALLD_RULES_DOWN} && firewall-cmd --remove-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade'"
+		fi
+		if [[ -n ${SERVER_WG_IPV6} ]]; then
+			FIREWALLD_IPV6_ADDRESS=$(echo "${SERVER_WG_IPV6}" | sed 's/:[^:]*$/:0/')
+			FIREWALLD_RULES="${FIREWALLD_RULES} && firewall-cmd --add-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/64 masquerade'"
+			FIREWALLD_RULES_DOWN="${FIREWALLD_RULES_DOWN} && firewall-cmd --remove-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/64 masquerade'"
+		fi
+		echo "${FIREWALLD_RULES}
+${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	else
-		echo "PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
-PostUp = iptables -I FORWARD -i ${SERVER_PUB_NIC} -o ${SERVER_WG_NIC} -j ACCEPT
-PostUp = iptables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostUp = ip6tables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostUp = ip6tables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${SERVER_PUB_NIC} -o ${SERVER_WG_NIC} -j ACCEPT
-PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostDown = ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT
-PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+		{
+			if [[ -n ${SERVER_WG_IPV4} ]]; then
+				echo "PostUp = iptables -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT"
+				echo "PostUp = iptables -I FORWARD -i ${SERVER_PUB_NIC4} -o ${SERVER_WG_NIC} -j ACCEPT"
+				echo "PostUp = iptables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT"
+				echo "PostUp = iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC4} -j MASQUERADE"
+				echo "PostDown = iptables -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT"
+				echo "PostDown = iptables -D FORWARD -i ${SERVER_PUB_NIC4} -o ${SERVER_WG_NIC} -j ACCEPT"
+				echo "PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT"
+				echo "PostDown = iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC4} -j MASQUERADE"
+			fi
+			if [[ -n ${SERVER_WG_IPV6} ]]; then
+				echo "PostUp = ip6tables -I FORWARD -i ${SERVER_WG_NIC} -j ACCEPT"
+				echo "PostUp = ip6tables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC6} -j MASQUERADE"
+				echo "PostDown = ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT"
+				echo "PostDown = ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC6} -j MASQUERADE"
+			fi
+		} >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	fi
 
 	# Enable routing on the server
-	echo "net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
+	{
+		if [[ -n ${SERVER_WG_IPV4} ]]; then
+			echo "net.ipv4.ip_forward = 1"
+		fi
+		if [[ -n ${SERVER_WG_IPV6} ]]; then
+			echo "net.ipv6.conf.all.forwarding = 1"
+		fi
+	} >/etc/sysctl.d/wg.conf
 
 	if [[ ${OS} == 'fedora' ]]; then
 		chmod -v 700 /etc/wireguard
@@ -466,6 +615,10 @@ net.ipv6.conf.all.forwarding = 1" >/etc/sysctl.d/wg.conf
 }
 
 function newClient() {
+	# Default missing routing flags (for older /etc/wireguard/params or manual runs)
+	CLIENT_ROUTE_IPV4=${CLIENT_ROUTE_IPV4:-1}
+	CLIENT_ROUTE_IPV6=${CLIENT_ROUTE_IPV6:-1}
+
 	# If SERVER_PUB_IP is IPv6, add brackets if missing
 	if [[ ${SERVER_PUB_IP} =~ .*:.* ]]; then
 		if [[ ${SERVER_PUB_IP} != *"["* ]] || [[ ${SERVER_PUB_IP} != *"]"* ]]; then
@@ -491,43 +644,52 @@ function newClient() {
 	done
 
 	for DOT_IP in {2..254}; do
-		DOT_EXISTS=$(grep -c "${SERVER_WG_IPV4::-1}${DOT_IP}" "/etc/wireguard/${SERVER_WG_NIC}.conf")
-		if [[ ${DOT_EXISTS} == '0' ]]; then
+		if [[ -n ${SERVER_WG_IPV4} ]]; then
+			DOT_EXISTS=$(grep -c "${SERVER_WG_IPV4::-1}${DOT_IP}" "/etc/wireguard/${SERVER_WG_NIC}.conf")
+			if [[ ${DOT_EXISTS} == '0' ]]; then
+				break
+			fi
+		else
+			DOT_EXISTS=0
 			break
 		fi
 	done
 
-	if [[ ${DOT_EXISTS} == '1' ]]; then
+	if [[ -n ${SERVER_WG_IPV4} && ${DOT_EXISTS} == '1' ]]; then
 		echo ""
 		echo "The subnet configured supports only 253 clients."
 		exit 1
 	fi
 
-	BASE_IP=$(echo "$SERVER_WG_IPV4" | awk -F '.' '{ print $1"."$2"."$3 }')
-	until [[ ${IPV4_EXISTS} == '0' ]]; do
-		read -rp "Client WireGuard IPv4: ${BASE_IP}." -e -i "${DOT_IP}" DOT_IP
-		CLIENT_WG_IPV4="${BASE_IP}.${DOT_IP}"
-		IPV4_EXISTS=$(grep -c "$CLIENT_WG_IPV4/32" "/etc/wireguard/${SERVER_WG_NIC}.conf")
+	if [[ -n ${SERVER_WG_IPV4} && ${CLIENT_ROUTE_IPV4} -eq 1 ]]; then
+		BASE_IP=$(echo "$SERVER_WG_IPV4" | awk -F '.' '{ print $1"."$2"."$3 }')
+		until [[ ${IPV4_EXISTS} == '0' ]]; do
+			read -rp "Client WireGuard IPv4: ${BASE_IP}." -e -i "${DOT_IP}" DOT_IP
+			CLIENT_WG_IPV4="${BASE_IP}.${DOT_IP}"
+			IPV4_EXISTS=$(grep -c "$CLIENT_WG_IPV4/32" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 
-		if [[ ${IPV4_EXISTS} != 0 ]]; then
-			echo ""
-			echo -e "${ORANGE}A client with the specified IPv4 was already created, please choose another IPv4.${NC}"
-			echo ""
-		fi
-	done
+			if [[ ${IPV4_EXISTS} != 0 ]]; then
+				echo ""
+				echo -e "${ORANGE}A client with the specified IPv4 was already created, please choose another IPv4.${NC}"
+				echo ""
+			fi
+		done
+	fi
 
-	BASE_IP=$(echo "$SERVER_WG_IPV6" | awk -F '::' '{ print $1 }')
-	until [[ ${IPV6_EXISTS} == '0' ]]; do
-		read -rp "Client WireGuard IPv6: ${BASE_IP}::" -e -i "${DOT_IP}" DOT_IP
-		CLIENT_WG_IPV6="${BASE_IP}::${DOT_IP}"
-		IPV6_EXISTS=$(grep -c "${CLIENT_WG_IPV6}/128" "/etc/wireguard/${SERVER_WG_NIC}.conf")
+	if [[ -n ${SERVER_WG_IPV6} && ${CLIENT_ROUTE_IPV6} -eq 1 ]]; then
+		BASE_IP=$(echo "$SERVER_WG_IPV6" | awk -F '::' '{ print $1 }')
+		until [[ ${IPV6_EXISTS} == '0' ]]; do
+			read -rp "Client WireGuard IPv6: ${BASE_IP}::" -e -i "${DOT_IP}" DOT_IP
+			CLIENT_WG_IPV6="${BASE_IP}::${DOT_IP}"
+			IPV6_EXISTS=$(grep -c "${CLIENT_WG_IPV6}/128" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 
-		if [[ ${IPV6_EXISTS} != 0 ]]; then
-			echo ""
-			echo -e "${ORANGE}A client with the specified IPv6 was already created, please choose another IPv6.${NC}"
-			echo ""
-		fi
-	done
+			if [[ ${IPV6_EXISTS} != 0 ]]; then
+				echo ""
+				echo -e "${ORANGE}A client with the specified IPv6 was already created, please choose another IPv6.${NC}"
+				echo ""
+			fi
+		done
+	fi
 
 	# Generate key pair for the client
 	CLIENT_PRIV_KEY=$(wg genkey)
@@ -537,28 +699,46 @@ function newClient() {
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
 	# Create client file and add the server as a peer
-	echo "[Interface]
-PrivateKey = ${CLIENT_PRIV_KEY}
-Address = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
-DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}
+	{
+		echo "[Interface]"
+		echo "PrivateKey = ${CLIENT_PRIV_KEY}"
+		if [[ -n ${CLIENT_WG_IPV4} ]]; then
+			echo "Address = ${CLIENT_WG_IPV4}/32"
+		fi
+		if [[ -n ${CLIENT_WG_IPV6} ]]; then
+			echo "Address = ${CLIENT_WG_IPV6}/128"
+		fi
+		echo "DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}"
 
-# Uncomment the next line to set a custom MTU
-# This might impact performance, so use it only if you know what you are doing
-# See https://github.com/nitred/nr-wg-mtu-finder to find your optimal MTU
-# MTU = 1420
+		echo ""
+		echo "# Uncomment the next line to set a custom MTU"
+		echo "# This might impact performance, so use it only if you know what you are doing"
+		echo "# See https://github.com/nitred/nr-wg-mtu-finder to find your optimal MTU"
+		echo "# MTU = 1420"
 
-[Peer]
-PublicKey = ${SERVER_PUB_KEY}
-PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-Endpoint = ${ENDPOINT}
-AllowedIPs = ${ALLOWED_IPS}" >"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+		echo ""
+		echo "[Peer]"
+		echo "PublicKey = ${SERVER_PUB_KEY}"
+		echo "PresharedKey = ${CLIENT_PRE_SHARED_KEY}"
+		echo "Endpoint = ${ENDPOINT}"
+		echo "AllowedIPs = ${ALLOWED_IPS}"
+	} >"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
 
 	# Add the client as a peer to the server
-	echo -e "\n### Client ${CLIENT_NAME}
-[Peer]
-PublicKey = ${CLIENT_PUB_KEY}
-PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+	{
+		echo ""
+		echo "### Client ${CLIENT_NAME}"
+		echo "[Peer]"
+		echo "PublicKey = ${CLIENT_PUB_KEY}"
+		echo "PresharedKey = ${CLIENT_PRE_SHARED_KEY}"
+		if [[ -n ${CLIENT_WG_IPV4} && -n ${CLIENT_WG_IPV6} ]]; then
+			echo "AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128"
+		elif [[ -n ${CLIENT_WG_IPV4} ]]; then
+			echo "AllowedIPs = ${CLIENT_WG_IPV4}/32"
+		else
+			echo "AllowedIPs = ${CLIENT_WG_IPV6}/128"
+		fi
+	} >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 
 	wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}")
 
