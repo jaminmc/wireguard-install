@@ -230,6 +230,13 @@ function detectIPStack() {
 	fi
 }
 
+function generateRandomTunnelPrefix() {
+	# Generate two random octets (0-254) used to derive matching IPv4/IPv6 defaults
+	# Example: 10.<A>.<B>.1 and fd42:<A>:<B>::1
+	TUN_OCTET_A=$(shuf -i0-254 -n1)
+	TUN_OCTET_B=$(shuf -i0-254 -n1)
+}
+
 function installQuestions() {
 	echo "Welcome to the WireGuard installer!"
 	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
@@ -239,6 +246,7 @@ function installQuestions() {
 	echo ""
 
 	detectIPStack
+	generateRandomTunnelPrefix
 	if [[ ${IPV4_AVAILABLE} -eq 0 && ${IPV6_AVAILABLE} -eq 0 ]]; then
 		echo -e "${RED}No IPv4 or IPv6 connectivity detected.${NC}"
 		echo "This installer requires at least one IP family to be available on the server."
@@ -302,16 +310,18 @@ function installQuestions() {
 	done
 
 	if [[ ${IPV4_AVAILABLE} -eq 1 ]]; then
+		RAND_WG_IPV4_DEFAULT="10.${TUN_OCTET_A}.${TUN_OCTET_B}.1"
 		until [[ ${SERVER_WG_IPV4} =~ ^([0-9]{1,3}\.){3} ]]; do
-			read -rp "Server WireGuard IPv4: " -e -i 10.66.66.1 SERVER_WG_IPV4
+			read -rp "Server WireGuard IPv4: " -e -i "${RAND_WG_IPV4_DEFAULT}" SERVER_WG_IPV4
 		done
 	else
 		SERVER_WG_IPV4=""
 	fi
 
 	if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+		RAND_WG_IPV6_DEFAULT="fd42:${TUN_OCTET_A}:${TUN_OCTET_B}::1"
 		until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
-			read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
+			read -rp "Server WireGuard IPv6: " -e -i "${RAND_WG_IPV6_DEFAULT}" SERVER_WG_IPV6
 		done
 	else
 		SERVER_WG_IPV6=""
