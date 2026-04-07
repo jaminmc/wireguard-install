@@ -900,11 +900,17 @@ function newClient() {
 		echo "AllowedIPs = ${ALLOWED_IPS}"
 	} >"${BASE_CLIENT_CONFIG_PATH}"
 
-	# AmneziaWG-enhanced client config (adds obfuscation fields)
+	# AmneziaWG-enhanced client config (obfuscation options belong in [Interface])
 	{
-		cat "${BASE_CLIENT_CONFIG_PATH}"
-		echo ""
-		echo "# AmneziaWG obfuscation parameters (client-side)"
+		echo "[Interface]"
+		echo "PrivateKey = ${CLIENT_PRIV_KEY}"
+		if [[ -n ${CLIENT_WG_IPV4} ]]; then
+			echo "Address = ${CLIENT_WG_IPV4}/32"
+		fi
+		if [[ -n ${CLIENT_WG_IPV6} ]]; then
+			echo "Address = ${CLIENT_WG_IPV6}/128"
+		fi
+		echo "DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}"
 		echo "Jc = ${AWG_JC}"
 		echo "Jmin = ${AWG_JMIN}"
 		echo "Jmax = ${AWG_JMAX}"
@@ -913,6 +919,19 @@ function newClient() {
 		if [[ -n ${AWG_I3} ]]; then echo "I3 = ${AWG_I3}"; fi
 		if [[ -n ${AWG_I4} ]]; then echo "I4 = ${AWG_I4}"; fi
 		if [[ -n ${AWG_I5} ]]; then echo "I5 = ${AWG_I5}"; fi
+
+		echo ""
+		echo "# Uncomment the next line to set a custom MTU"
+		echo "# This might impact performance, so use it only if you know what you are doing"
+		echo "# See https://github.com/nitred/nr-wg-mtu-finder to find your optimal MTU"
+		echo "# MTU = 1420"
+
+		echo ""
+		echo "[Peer]"
+		echo "PublicKey = ${SERVER_PUB_KEY}"
+		echo "PresharedKey = ${CLIENT_PRE_SHARED_KEY}"
+		echo "Endpoint = ${ENDPOINT}"
+		echo "AllowedIPs = ${ALLOWED_IPS}"
 	} >"${AWG_CLIENT_CONFIG_PATH}"
 
 	# Add the client as a peer to the server
