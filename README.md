@@ -1,14 +1,16 @@
-# WireGuard installer
+# WireGuard / AmneziaWG installer
 
 ![Lint](https://github.com/angristan/wireguard-install/workflows/Lint/badge.svg)
 [![Say Thanks!](https://img.shields.io/badge/Say%20Thanks-!-1EAEDB.svg)](https://saythanks.io/to/angristan)
 
-**This project is a bash script that aims to setup a [WireGuard](https://www.wireguard.com/) VPN on a Linux server, as easily as possible!**
+**This project is a bash script that aims to setup a [WireGuard](https://www.wireguard.com/) / AmneziaWG VPN on a Linux server, as easily as possible!**
 
 WireGuard is a point-to-point VPN that can be used in different ways. Here, we mean a VPN as in: the client will forward all its traffic through an encrypted tunnel to the server.
 The server will apply NAT to the client's traffic so it will appear as if the client is browsing the web with the server's IP.
 
-The script supports both IPv4 and IPv6. Please check the [issues](https://github.com/angristan/wireguard-install/issues) for ongoing development, bugs and planned features! You might also want to check the [discussions](https://github.com/angristan/wireguard-install/discussions) for help.
+The script supports both IPv4 and IPv6, including setups where IPv4 and IPv6 egress use different network interfaces. It also supports IPv6-only servers using 464XLAT/CLAT.
+
+Please check the [issues](https://github.com/angristan/wireguard-install/issues) for ongoing development, bugs and planned features! You might also want to check the [discussions](https://github.com/angristan/wireguard-install/discussions) for help.
 
 WireGuard does not fit your environment? Check out [openvpn-install](https://github.com/angristan/openvpn-install).
 
@@ -36,9 +38,31 @@ chmod +x wireguard-install.sh
 ./wireguard-install.sh
 ```
 
-It will install WireGuard (kernel module and tools) on the server, configure it, create a systemd service and a client configuration file.
+It will install and configure:
 
-Run the script again to add or remove clients!
+- On **VMs / bare metal**: **AmneziaWG DKMS + tools** (when available for your distro).
+- In **containers**: **userspace `amneziawg-go`** plus tooling (kernel modules are often unavailable in containers).
+
+It then configures the server, enables routing/firewall rules for the detected IP stack, and generates client configuration files.
+
+Run the script again to manage clients (the script returns to a management menu after install).
+
+### Client configs
+
+For each client, the script generates **two files**:
+
+- A **standard WireGuard-compatible** client config (no AmneziaWG-only fields)
+- An **AmneziaWG-enhanced** client config (includes AmneziaWG obfuscation parameters)
+
+If `qrencode` is installed, it prints QR codes for both.
+
+### DNS
+
+The installer can:
+
+- Detect the host’s DNS resolvers (including common `systemd-resolved` setups)
+- Offer a menu of public DNS providers
+- Accept custom DNS resolvers (IPv4 or IPv6)
 
 ## Providers
 

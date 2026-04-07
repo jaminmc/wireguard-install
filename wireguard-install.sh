@@ -275,6 +275,35 @@ function getHostDNSResolvers() {
 	echo "${NS}"
 }
 
+function generateAmneziaWGClientObfuscation() {
+	# AmneziaWG-specific client-side obfuscation parameters.
+	# These are intended to be used by AmneziaWG clients/tools; standard WireGuard clients
+	# may not understand them.
+	#
+	# Based on amneziawg-go documentation:
+	# - If no value specified, AWG treats it as 0 (disabled)
+	# - Junk packets (Jc/Jmin/Jmax) and custom signature packets (I1-I5) are generally
+	#   recommended on the client side only.
+
+	# Junk packets (client-side)
+	AWG_JC=$(shuf -i4-12 -n1)
+	AWG_JMIN=$(shuf -i40-200 -n1)
+	AWG_JMAX=$(shuf -i200-600 -n1)
+	if [[ ${AWG_JMAX} -lt ${AWG_JMIN} ]]; then
+		local TMP=${AWG_JMIN}
+		AWG_JMIN=${AWG_JMAX}
+		AWG_JMAX=${TMP}
+	fi
+
+	# Signature packets (client-side). Kept small to avoid MTU issues.
+	# Uses tags: <t> timestamp, <r N> random bytes, <rd N> random digits, <rc N> random chars.
+	AWG_I1="<t><r 8>"
+	AWG_I2="<r 12>"
+	AWG_I3="<t><rd 12>"
+	AWG_I4="<rc 16>"
+	AWG_I5=""
+}
+
 function installQuestions() {
 	echo "Welcome to the WireGuard installer!"
 	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
@@ -285,6 +314,7 @@ function installQuestions() {
 
 	detectIPStack
 	generateRandomTunnelPrefix
+	generateAmneziaWGClientObfuscation
 	if [[ ${IPV4_AVAILABLE} -eq 0 && ${IPV6_AVAILABLE} -eq 0 ]]; then
 		echo -e "${RED}No IPv4 or IPv6 connectivity detected.${NC}"
 		echo "This installer requires at least one IP family to be available on the server."
@@ -611,6 +641,14 @@ IPV6_AVAILABLE=${IPV6_AVAILABLE}
 CLAT_PRESENT=${CLAT_PRESENT}
 CLIENT_ROUTE_IPV4=${CLIENT_ROUTE_IPV4}
 CLIENT_ROUTE_IPV6=${CLIENT_ROUTE_IPV6}
+AWG_JC=${AWG_JC}
+AWG_JMIN=${AWG_JMIN}
+AWG_JMAX=${AWG_JMAX}
+AWG_I1=${AWG_I1}
+AWG_I2=${AWG_I2}
+AWG_I3=${AWG_I3}
+AWG_I4=${AWG_I4}
+AWG_I5=${AWG_I5}
 SERVER_PORT=${SERVER_PORT}
 SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
 SERVER_PUB_KEY=${SERVER_PUB_KEY}
@@ -735,9 +773,23 @@ ${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 }
 
 function newClient() {
+	# Clear transient state so repeated runs don't reuse previous answers.
+	unset CLIENT_NAME CLIENT_EXISTS CLIENT_NUMBER DOT_IP DOT_EXISTS BASE_IP
+	unset IPV4_EXISTS IPV6_EXISTS CLIENT_WG_IPV4 CLIENT_WG_IPV6
+
 	# Default missing routing flags (for older /etc/wireguard/params or manual runs)
 	CLIENT_ROUTE_IPV4=${CLIENT_ROUTE_IPV4:-1}
 	CLIENT_ROUTE_IPV6=${CLIENT_ROUTE_IPV6:-1}
+
+	# Default missing AWG obfuscation settings (older /etc/wireguard/params)
+	if [[ -z ${AWG_JC} || -z ${AWG_JMIN} || -z ${AWG_JMAX} ]]; then
+		generateAmneziaWGClientObfuscation
+	fi
+	AWG_I1=${AWG_I1:-}
+	AWG_I2=${AWG_I2:-}
+	AWG_I3=${AWG_I3:-}
+	AWG_I4=${AWG_I4:-}
+	AWG_I5=${AWG_I5:-}
 
 	# If SERVER_PUB_IP is IPv6, add brackets if missing
 	if [[ ${SERVER_PUB_IP} =~ .*:.* ]]; then
@@ -819,6 +871,10 @@ function newClient() {
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
 	# Create client file and add the server as a peer
+	BASE_CLIENT_CONFIG_PATH="${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+	AWG_CLIENT_CONFIG_PATH="${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}-amneziawg.conf"
+
+	# Standard WireGuard-compatible client config
 	{
 		echo "[Interface]"
 		echo "PrivateKey = ${CLIENT_PRIV_KEY}"
@@ -842,7 +898,22 @@ function newClient() {
 		echo "PresharedKey = ${CLIENT_PRE_SHARED_KEY}"
 		echo "Endpoint = ${ENDPOINT}"
 		echo "AllowedIPs = ${ALLOWED_IPS}"
-	} >"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+	} >"${BASE_CLIENT_CONFIG_PATH}"
+
+	# AmneziaWG-enhanced client config (adds obfuscation fields)
+	{
+		cat "${BASE_CLIENT_CONFIG_PATH}"
+		echo ""
+		echo "# AmneziaWG obfuscation parameters (client-side)"
+		echo "Jc = ${AWG_JC}"
+		echo "Jmin = ${AWG_JMIN}"
+		echo "Jmax = ${AWG_JMAX}"
+		if [[ -n ${AWG_I1} ]]; then echo "I1 = ${AWG_I1}"; fi
+		if [[ -n ${AWG_I2} ]]; then echo "I2 = ${AWG_I2}"; fi
+		if [[ -n ${AWG_I3} ]]; then echo "I3 = ${AWG_I3}"; fi
+		if [[ -n ${AWG_I4} ]]; then echo "I4 = ${AWG_I4}"; fi
+		if [[ -n ${AWG_I5} ]]; then echo "I5 = ${AWG_I5}"; fi
+	} >"${AWG_CLIENT_CONFIG_PATH}"
 
 	# Add the client as a peer to the server
 	{
@@ -864,12 +935,21 @@ function newClient() {
 
 	# Generate QR code if qrencode is installed
 	if command -v qrencode &>/dev/null; then
-		echo -e "${GREEN}\nHere is your client config file as a QR Code:\n${NC}"
-		qrencode -t ansiutf8 -l L <"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
+		echo -e "${GREEN}\nHere is your standard client config file as a QR Code:\n${NC}"
+		qrencode -t ansiutf8 -l L <"${BASE_CLIENT_CONFIG_PATH}"
+		echo ""
+		echo -e "${GREEN}Here is your AmneziaWG client config file as a QR Code:\n${NC}"
+		qrencode -t ansiutf8 -l L <"${AWG_CLIENT_CONFIG_PATH}"
 		echo ""
 	fi
 
-	echo -e "${GREEN}Your client config file is in ${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf${NC}"
+	echo -e "${GREEN}Your standard client config file is in ${BASE_CLIENT_CONFIG_PATH}${NC}"
+	echo -e "${GREEN}Your AmneziaWG client config file is in ${AWG_CLIENT_CONFIG_PATH}${NC}"
+}
+
+function resetMenuState() {
+	# Reset variables that are reused across menu actions.
+	unset MENU_OPTION CLIENT_NUMBER CLIENT_NAME
 }
 
 function listClients() {
@@ -986,37 +1066,48 @@ function uninstallWg() {
 }
 
 function manageMenu() {
-	echo "Welcome to WireGuard-install!"
-	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
-	echo ""
-	echo "It looks like WireGuard is already installed."
-	echo ""
-	echo "What do you want to do?"
-	echo "   1) Add a new user"
-	echo "   2) List all users"
-	echo "   3) Revoke existing user"
-	echo "   4) Uninstall WireGuard"
-	echo "   5) Exit"
-	until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
-		read -rp "Select an option [1-5]: " MENU_OPTION
+	while true; do
+		resetMenuState
+		# Reload persisted parameters in case something changed
+		# (e.g. previous run wrote new values, or user edited params).
+		if [[ -e /etc/wireguard/params ]]; then
+			source /etc/wireguard/params
+		fi
+		echo "Welcome to WireGuard-install!"
+		echo "The git repository is available at: https://github.com/angristan/wireguard-install"
+		echo ""
+		echo "It looks like WireGuard is already installed."
+		echo ""
+		echo "What do you want to do?"
+		echo "   1) Add a new user"
+		echo "   2) List all users"
+		echo "   3) Revoke existing user"
+		echo "   4) Uninstall WireGuard"
+		echo "   5) Exit"
+		until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
+			read -rp "Select an option [1-5]: " MENU_OPTION
+		done
+		case "${MENU_OPTION}" in
+		1)
+			newClient
+			read -rp "Press enter to return to the menu..."
+			;;
+		2)
+			listClients
+			read -rp "Press enter to return to the menu..."
+			;;
+		3)
+			revokeClient
+			read -rp "Press enter to return to the menu..."
+			;;
+		4)
+			uninstallWg
+			;;
+		5)
+			exit 0
+			;;
+		esac
 	done
-	case "${MENU_OPTION}" in
-	1)
-		newClient
-		;;
-	2)
-		listClients
-		;;
-	3)
-		revokeClient
-		;;
-	4)
-		uninstallWg
-		;;
-	5)
-		exit 0
-		;;
-	esac
 }
 
 # Check for root, virt, OS...
@@ -1028,4 +1119,7 @@ if [[ -e /etc/wireguard/params ]]; then
 	manageMenu
 else
 	installWireGuard
+	# After initial installation, drop into the menu without requiring a rerun.
+	source /etc/wireguard/params
+	manageMenu
 fi
