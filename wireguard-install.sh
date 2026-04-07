@@ -237,6 +237,44 @@ function generateRandomTunnelPrefix() {
 	TUN_OCTET_B=$(shuf -i0-254 -n1)
 }
 
+function isValidIPv4() {
+	local IP=$1
+	[[ ${IP} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]
+}
+
+function isValidIPv6() {
+	local IP=$1
+	# Basic sanity check for IPv6 literals (full validation is intentionally avoided in bash)
+	[[ ${IP} =~ : ]] && [[ ${IP} =~ ^[0-9a-fA-F:]+$ ]]
+}
+
+function isValidIP() {
+	local IP=$1
+	isValidIPv4 "${IP}" || isValidIPv6 "${IP}"
+}
+
+function getHostDNSResolvers() {
+	# Returns up to two DNS resolvers (space-separated), if detected.
+	# Handles systemd-resolved stub (/etc/resolv.conf -> 127.0.0.53) by reading the "real" file.
+	local RESOLV_FILE="/etc/resolv.conf"
+	local NS
+
+	if [[ -r ${RESOLV_FILE} ]] && grep -qE '^\s*nameserver\s+127\.0\.0\.53\s*$' "${RESOLV_FILE}"; then
+		if [[ -r /run/systemd/resolve/resolv.conf ]]; then
+			RESOLV_FILE="/run/systemd/resolve/resolv.conf"
+		elif [[ -r /run/systemd/resolve/resolv.conf ]]; then
+			RESOLV_FILE="/run/systemd/resolve/resolv.conf"
+		fi
+	fi
+
+	NS=$(awk '/^[[:space:]]*nameserver[[:space:]]+/ {print $2}' "${RESOLV_FILE}" 2>/dev/null \
+		| grep -Ev '^(127\.|::1$|0\.0\.0\.0$)$' \
+		| awk '!seen[$0]++' \
+		| head -n 2 | tr '\n' ' ')
+
+	echo "${NS}"
+}
+
 function installQuestions() {
 	echo "Welcome to the WireGuard installer!"
 	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
@@ -333,16 +371,88 @@ function installQuestions() {
 		read -rp "Server WireGuard port [1-65535]: " -e -i "${RANDOM_PORT}" SERVER_PORT
 	done
 
-	# Cloudflare DNS by default
-	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
+	# DNS selection (host DNS, curated public DNS, or custom). Supports IPv4 and IPv6.
+	HOST_DNS="$(getHostDNSResolvers)"
+	HOST_DNS_1=$(echo "${HOST_DNS}" | awk '{print $1}')
+	HOST_DNS_2=$(echo "${HOST_DNS}" | awk '{print $2}')
+
+	echo ""
+	echo "DNS resolvers to use for the clients:"
+	if [[ -n ${HOST_DNS_1} ]]; then
+		echo "   1) Use host resolvers (${HOST_DNS_1}${HOST_DNS_2:+, ${HOST_DNS_2}})"
+	else
+		echo "   1) Use host resolvers (not detected)"
+	fi
+	echo "   2) Cloudflare (1.1.1.1, 1.0.0.1) + IPv6 (2606:4700:4700::1111, 2606:4700:4700::1001)"
+	echo "   3) Google (8.8.8.8, 8.8.4.4) + IPv6 (2001:4860:4860::8888, 2001:4860:4860::8844)"
+	echo "   4) Quad9 (9.9.9.9, 149.112.112.112) + IPv6 (2620:fe::fe, 2620:fe::9)"
+	echo "   5) AdGuard (94.140.14.14, 94.140.15.15) + IPv6 (2a10:50c0::ad1:ff, 2a10:50c0::ad2:ff)"
+	echo "   6) Custom (enter your own)"
+
+	# Default to host resolvers if detected; otherwise Cloudflare.
+	if [[ -n ${HOST_DNS_1} ]]; then
+		DNS_MENU_DEFAULT=1
+	else
+		DNS_MENU_DEFAULT=2
+	fi
+	until [[ ${DNS_MENU} =~ ^[1-6]$ ]]; do
+		read -rp "Select an option [${DNS_MENU_DEFAULT}]: " DNS_MENU
+		DNS_MENU=${DNS_MENU:-${DNS_MENU_DEFAULT}}
 	done
-	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 1.0.0.1 CLIENT_DNS_2
-		if [[ ${CLIENT_DNS_2} == "" ]]; then
+
+	case "${DNS_MENU}" in
+	1)
+		CLIENT_DNS_1=${HOST_DNS_1}
+		CLIENT_DNS_2=${HOST_DNS_2:-${HOST_DNS_1}}
+		;;
+	2)
+		if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			CLIENT_DNS_1="2606:4700:4700::1111"
+			CLIENT_DNS_2="2606:4700:4700::1001"
+		else
+			CLIENT_DNS_1="1.1.1.1"
+			CLIENT_DNS_2="1.0.0.1"
+		fi
+		;;
+	3)
+		if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			CLIENT_DNS_1="2001:4860:4860::8888"
+			CLIENT_DNS_2="2001:4860:4860::8844"
+		else
+			CLIENT_DNS_1="8.8.8.8"
+			CLIENT_DNS_2="8.8.4.4"
+		fi
+		;;
+	4)
+		if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			CLIENT_DNS_1="2620:fe::fe"
+			CLIENT_DNS_2="2620:fe::9"
+		else
+			CLIENT_DNS_1="9.9.9.9"
+			CLIENT_DNS_2="149.112.112.112"
+		fi
+		;;
+	5)
+		if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+			CLIENT_DNS_1="2a10:50c0::ad1:ff"
+			CLIENT_DNS_2="2a10:50c0::ad2:ff"
+		else
+			CLIENT_DNS_1="94.140.14.14"
+			CLIENT_DNS_2="94.140.15.15"
+		fi
+		;;
+	6)
+		until isValidIP "${CLIENT_DNS_1}"; do
+			read -rp "First DNS resolver to use for the clients: " -e -i "${HOST_DNS_1:-1.1.1.1}" CLIENT_DNS_1
+		done
+		until [[ -z ${CLIENT_DNS_2} ]] || isValidIP "${CLIENT_DNS_2}"; do
+			read -rp "Second DNS resolver to use for the clients (optional): " -e -i "${HOST_DNS_2:-}" CLIENT_DNS_2
+		done
+		if [[ -z ${CLIENT_DNS_2} ]]; then
 			CLIENT_DNS_2="${CLIENT_DNS_1}"
 		fi
-	done
+		;;
+	esac
 
 	until [[ ${ALLOWED_IPS} =~ ^.+$ ]]; do
 		echo -e "\nWireGuard uses a parameter called AllowedIPs to determine what is routed over the VPN."
