@@ -302,7 +302,6 @@ function getHomeDirForClient() {
 function initialCheck() {
 	isRoot
 	checkOS
-	checkVirt
 	selectWgImplementation
 }
 
@@ -635,6 +634,7 @@ function installQuestions() {
 }
 
 function installWireGuard() {
+	checkVirt
 	# Run setup questions first
 	installQuestions
 
@@ -737,33 +737,35 @@ function installWireGuard() {
 	SERVER_PRIV_KEY=$("${WG_CMD}" genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | "${WG_CMD}" pubkey)
 
-	# Save WireGuard settings
-	echo "SERVER_PUB_IP=${SERVER_PUB_IP}
-SERVER_PUB_NIC=${SERVER_PUB_NIC}
-SERVER_PUB_NIC4=${SERVER_PUB_NIC4}
-SERVER_PUB_NIC6=${SERVER_PUB_NIC6}
-SERVER_WG_NIC=${SERVER_WG_NIC}
-SERVER_WG_IPV4=${SERVER_WG_IPV4}
-SERVER_WG_IPV6=${SERVER_WG_IPV6}
-IPV4_AVAILABLE=${IPV4_AVAILABLE}
-IPV6_AVAILABLE=${IPV6_AVAILABLE}
-CLAT_PRESENT=${CLAT_PRESENT}
-CLIENT_ROUTE_IPV4=${CLIENT_ROUTE_IPV4}
-CLIENT_ROUTE_IPV6=${CLIENT_ROUTE_IPV6}
-AWG_JC=${AWG_JC}
-AWG_JMIN=${AWG_JMIN}
-AWG_JMAX=${AWG_JMAX}
-AWG_I1=${AWG_I1}
-AWG_I2=${AWG_I2}
-AWG_I3=${AWG_I3}
-AWG_I4=${AWG_I4}
-AWG_I5=${AWG_I5}
-SERVER_PORT=${SERVER_PORT}
-SERVER_PRIV_KEY=${SERVER_PRIV_KEY}
-SERVER_PUB_KEY=${SERVER_PUB_KEY}
-CLIENT_DNS_1=${CLIENT_DNS_1}
-CLIENT_DNS_2=${CLIENT_DNS_2}
-ALLOWED_IPS=${ALLOWED_IPS}" >/etc/wireguard/params
+	# Save WireGuard settings (printf %q so AmneziaWG I1–I5 patterns with <, >, spaces are source-safe)
+	{
+		printf 'SERVER_PUB_IP=%q\n' "${SERVER_PUB_IP}"
+		printf 'SERVER_PUB_NIC=%q\n' "${SERVER_PUB_NIC}"
+		printf 'SERVER_PUB_NIC4=%q\n' "${SERVER_PUB_NIC4}"
+		printf 'SERVER_PUB_NIC6=%q\n' "${SERVER_PUB_NIC6}"
+		printf 'SERVER_WG_NIC=%q\n' "${SERVER_WG_NIC}"
+		printf 'SERVER_WG_IPV4=%q\n' "${SERVER_WG_IPV4}"
+		printf 'SERVER_WG_IPV6=%q\n' "${SERVER_WG_IPV6}"
+		printf 'IPV4_AVAILABLE=%q\n' "${IPV4_AVAILABLE}"
+		printf 'IPV6_AVAILABLE=%q\n' "${IPV6_AVAILABLE}"
+		printf 'CLAT_PRESENT=%q\n' "${CLAT_PRESENT}"
+		printf 'CLIENT_ROUTE_IPV4=%q\n' "${CLIENT_ROUTE_IPV4}"
+		printf 'CLIENT_ROUTE_IPV6=%q\n' "${CLIENT_ROUTE_IPV6}"
+		printf 'AWG_JC=%q\n' "${AWG_JC}"
+		printf 'AWG_JMIN=%q\n' "${AWG_JMIN}"
+		printf 'AWG_JMAX=%q\n' "${AWG_JMAX}"
+		printf 'AWG_I1=%q\n' "${AWG_I1}"
+		printf 'AWG_I2=%q\n' "${AWG_I2}"
+		printf 'AWG_I3=%q\n' "${AWG_I3}"
+		printf 'AWG_I4=%q\n' "${AWG_I4}"
+		printf 'AWG_I5=%q\n' "${AWG_I5}"
+		printf 'SERVER_PORT=%q\n' "${SERVER_PORT}"
+		printf 'SERVER_PRIV_KEY=%q\n' "${SERVER_PRIV_KEY}"
+		printf 'SERVER_PUB_KEY=%q\n' "${SERVER_PUB_KEY}"
+		printf 'CLIENT_DNS_1=%q\n' "${CLIENT_DNS_1}"
+		printf 'CLIENT_DNS_2=%q\n' "${CLIENT_DNS_2}"
+		printf 'ALLOWED_IPS=%q\n' "${ALLOWED_IPS}"
+	} >/etc/wireguard/params
 
 	# Add server interface
 	{
@@ -1225,8 +1227,9 @@ function manageMenu() {
 		echo "   3) Revoke existing user"
 		echo "   4) Uninstall WireGuard"
 		echo "   5) Exit"
-		until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
-			read -rp "Select an option [1-5]: " MENU_OPTION
+		echo "   q) Quit (same as 5)"
+		until [[ ${MENU_OPTION} =~ ^([1-5]|[qQ])$ ]]; do
+			read -rp "Select an option [1-5 or q]: " MENU_OPTION
 		done
 		case "${MENU_OPTION}" in
 		1)
@@ -1244,7 +1247,7 @@ function manageMenu() {
 		4)
 			uninstallWg
 			;;
-		5)
+		5 | q | Q)
 			exit 0
 			;;
 		esac
