@@ -101,9 +101,78 @@ function installAmneziaWGGo() {
 	fi
 }
 
+function ensureAmneziaWGRepos() {
+	# Ensure repositories are present for amneziawg-dkms/amneziawg-tools.
+	# This is best-effort and distro-dependent.
+
+	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
+		installPackages apt-get update
+		# Keep dependencies minimal and compatible with Debian (including Trixie).
+		installPackages apt-get install -y --no-install-recommends ca-certificates gnupg
+
+		# Add Launchpad PPA: amnezia/ppa
+		# Ubuntu: prefer add-apt-repository when available.
+		# Debian: add-apt-repository may be missing; we fall back to manual source entry below.
+		if ! command -v add-apt-repository &>/dev/null; then
+			# Try to install it if the package exists; don't fail if it doesn't (e.g. Debian Trixie).
+			apt-get install -y --no-install-recommends software-properties-common >/dev/null 2>&1 || true
+		fi
+		if command -v add-apt-repository &>/dev/null; then
+			add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
+		fi
+
+		if ! grep -Rqs "ppa\\.launchpadcontent\\.net/amnezia/ppa" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+			# Manual PPA entry fallback
+			source /etc/os-release
+			# Launchpad PPAs are published for Ubuntu series names, not Debian codenames.
+			# Map Debian releases to an Ubuntu series known to exist for this PPA.
+			if [[ ${ID} == "debian" || ${ID} == "raspbian" ]]; then
+				case "${VERSION_CODENAME}" in
+				trixie)
+					PPA_CODENAME="noble"
+					;;
+				bookworm)
+					PPA_CODENAME="focal"
+					;;
+				*)
+					PPA_CODENAME="focal"
+					;;
+				esac
+			else
+				PPA_CODENAME="${VERSION_CODENAME}"
+				if [[ -z ${PPA_CODENAME} ]]; then
+					PPA_CODENAME="focal"
+				fi
+			fi
+
+			# Import signing key (key id commonly referenced for this PPA)
+			# and wire it via signed-by instead of apt-key.
+			AMNEZIA_KEYRING="/usr/share/keyrings/amnezia-ppa.gpg"
+			if [[ ! -r ${AMNEZIA_KEYRING} ]]; then
+				installPackages bash -c "gpg --batch --keyserver keyserver.ubuntu.com --recv-keys 57290828 && gpg --batch --export 57290828 | gpg --batch --dearmor -o '${AMNEZIA_KEYRING}'"
+			fi
+
+			cat > /etc/apt/sources.list.d/amnezia-ppa.list <<EOF
+deb [signed-by=${AMNEZIA_KEYRING}] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${PPA_CODENAME} main
+EOF
+		fi
+
+		installPackages apt-get update
+	elif [[ ${OS} == 'fedora' ]]; then
+		installPackages dnf install -y dnf-plugins-core
+		dnf copr enable -y amneziavpn/amneziawg >/dev/null 2>&1 || true
+	elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]] || [[ ${OS} == 'oracle' ]]; then
+		installPackages dnf -y install 'dnf-command(copr)' || true
+		installPackages yum -y install yum-plugin-copr || true
+		(dnf copr enable -y amneziavpn/amneziawg >/dev/null 2>&1 || true)
+		(yum copr enable -y amneziavpn/amneziawg >/dev/null 2>&1 || true)
+	fi
+}
+
 function installAmneziaWGKernel() {
 	# Best-effort DKMS install for bare metal/VMs.
 	# Package availability depends on distro/repositories.
+	ensureAmneziaWGRepos
 	if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
 		apt-get update
 		installPackages apt-get install -y iptables resolvconf qrencode
@@ -164,6 +233,44 @@ function checkOS() {
 	fi
 }
 
+function selectWgImplementation() {
+	# Prefer AmneziaWG tooling when present.
+	# - awg/awg-quick know the AmneziaWG UAPI socket path
+	# - wg/wg-quick are fine for kernel WireGuard or wireguard-go userspace
+	WG_CMD="wg"
+	WG_QUICK_CMD="wg-quick"
+
+	if command -v awg &>/dev/null; then
+		WG_CMD="awg"
+	fi
+	if command -v awg-quick &>/dev/null; then
+		WG_QUICK_CMD="awg-quick"
+	fi
+
+	# Userspace amneziawg-go: tell quick helper which userspace backend to use
+	if [[ ${Container} == 1 ]] && command -v amneziawg-go &>/dev/null; then
+		export WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
+	fi
+}
+
+function ensureAmneziaPaths() {
+	# Prefer a single configuration directory by linking AmneziaWG path to /etc/wireguard.
+	# Desired state:
+	# - /etc/wireguard exists (real directory)
+	# - /etc/amnezia/amneziawg -> /etc/wireguard (symlink)
+	mkdir -p /etc/amnezia
+
+	# If /etc/amnezia/amneziawg exists and isn't the desired symlink, remove it.
+	if [[ -e /etc/amnezia/amneziawg || -L /etc/amnezia/amneziawg ]]; then
+		if [[ -L /etc/amnezia/amneziawg ]] && [[ $(readlink /etc/amnezia/amneziawg) == "/etc/wireguard" ]]; then
+			return 0
+		fi
+		rm -rf /etc/amnezia/amneziawg
+	fi
+
+	ln -s /etc/wireguard /etc/amnezia/amneziawg
+}
+
 function getHomeDirForClient() {
 	local CLIENT_NAME=$1
 
@@ -196,6 +303,7 @@ function initialCheck() {
 	isRoot
 	checkOS
 	checkVirt
+	selectWgImplementation
 }
 
 function detectIPStack() {
@@ -539,6 +647,7 @@ function installWireGuard() {
 		installPackages apt-get install -y iptables resolvconf qrencode
 		if [[ ${Container} == 1 ]]; then
 			# Prefer amneziawg-tools if available (UAPI path differs from WireGuard-Go)
+			ensureAmneziaWGRepos
 			if ! apt-get install -y --no-install-recommends amneziawg-tools; then
 				installPackages apt-get install -y --no-install-recommends wireguard-tools
 			fi
@@ -554,6 +663,7 @@ function installWireGuard() {
 		apt-get update
 		installPackages apt-get install -y iptables resolvconf qrencode
 		if [[ ${Container} == 1 ]]; then
+			ensureAmneziaWGRepos
 			if ! apt-get install -y -t buster-backports --no-install-recommends amneziawg-tools; then
 				installPackages apt-get install -y -t buster-backports --no-install-recommends wireguard-tools
 			fi
@@ -608,25 +718,24 @@ function installWireGuard() {
 		fi
 	fi
 
-	# Verify installation
-	if ! command -v wg &>/dev/null; then
-		echo -e "${RED}Installation failed. The 'wg' command was not found.${NC}"
+	# Verify installation (either wg or awg must exist)
+	if ! command -v "${WG_CMD}" &>/dev/null; then
+		echo -e "${RED}Installation failed. The '${WG_CMD}' command was not found.${NC}"
 		echo "Please check the installation output above for errors."
 		exit 1
 	fi
 
 	# Make sure the directory exists (this does not seem the be the case on fedora)
 	mkdir /etc/wireguard >/dev/null 2>&1
+	ensureAmneziaPaths
 
 	chmod 600 -R /etc/wireguard/
 
-	# When running userspace AmneziaWG, ensure wg-quick uses it.
-	if [[ ${Container} == 1 ]] && command -v amneziawg-go &>/dev/null; then
-		export WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
-	fi
+	# Ensure tooling/env is consistent for subsequent operations
+	selectWgImplementation
 
-	SERVER_PRIV_KEY=$(wg genkey)
-	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | wg pubkey)
+	SERVER_PRIV_KEY=$("${WG_CMD}" genkey)
+	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | "${WG_CMD}" pubkey)
 
 	# Save WireGuard settings
 	echo "SERVER_PUB_IP=${SERVER_PUB_IP}
@@ -734,7 +843,7 @@ ${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 			if command -v amneziawg-go &>/dev/null; then
 				export WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
 			fi
-			wg-quick up "${SERVER_WG_NIC}"
+			"${WG_QUICK_CMD}" up "${SERVER_WG_NIC}"
 		else
 			systemctl start "wg-quick@${SERVER_WG_NIC}"
 			systemctl enable "wg-quick@${SERVER_WG_NIC}"
@@ -864,9 +973,9 @@ function newClient() {
 	fi
 
 	# Generate key pair for the client
-	CLIENT_PRIV_KEY=$(wg genkey)
-	CLIENT_PUB_KEY=$(echo "${CLIENT_PRIV_KEY}" | wg pubkey)
-	CLIENT_PRE_SHARED_KEY=$(wg genpsk)
+	CLIENT_PRIV_KEY=$("${WG_CMD}" genkey)
+	CLIENT_PUB_KEY=$(echo "${CLIENT_PRIV_KEY}" | "${WG_CMD}" pubkey)
+	CLIENT_PRE_SHARED_KEY=$("${WG_CMD}" genpsk)
 
 	HOME_DIR=$(getHomeDirForClient "${CLIENT_NAME}")
 
@@ -950,7 +1059,7 @@ function newClient() {
 		fi
 	} >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 
-	wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}")
+	"${WG_CMD}" syncconf "${SERVER_WG_NIC}" <("${WG_QUICK_CMD}" strip "${SERVER_WG_NIC}")
 
 	# Generate QR code if qrencode is installed
 	if command -v qrencode &>/dev/null; then
@@ -1012,14 +1121,14 @@ function revokeClient() {
 	rm -f "${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAME}.conf"
 
 	# restart wireguard to apply changes
-	wg syncconf "${SERVER_WG_NIC}" <(wg-quick strip "${SERVER_WG_NIC}")
+	"${WG_CMD}" syncconf "${SERVER_WG_NIC}" <("${WG_QUICK_CMD}" strip "${SERVER_WG_NIC}")
 }
 
 function uninstallWg() {
 	echo ""
-	echo -e "\n${RED}WARNING: This will uninstall WireGuard and remove all the configuration files!${NC}"
+	echo -e "\n${RED}WARNING: This will uninstall WireGuard/AmneziaWG and remove all the configuration files!${NC}"
 	echo -e "${ORANGE}Please backup the /etc/wireguard directory if you want to keep your configuration files.\n${NC}"
-	read -rp "Do you really want to remove WireGuard? [y/n]: " -e REMOVE
+	read -rp "Do you really want to remove WireGuard/AmneziaWG? [y/n]: " -e REMOVE
 	REMOVE=${REMOVE:-n}
 	if [[ $REMOVE == 'y' ]]; then
 		checkOS
@@ -1035,27 +1144,40 @@ function uninstallWg() {
 		fi
 
 		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
-			apt-get autoremove --purge -y wireguard wireguard-tools qrencode
+			apt-get autoremove --purge -y wireguard wireguard-tools qrencode amneziawg-tools amneziawg-dkms || true
+			# amneziawg-go is installed via go install into /usr/local/bin
+			rm -f /usr/local/bin/amneziawg-go || true
 		elif [[ ${OS} == 'fedora' ]]; then
-			dnf remove -y --noautoremove wireguard-tools qrencode
+			dnf remove -y --noautoremove wireguard-tools qrencode amneziawg-tools amneziawg-dkms || true
+			rm -f /usr/local/bin/amneziawg-go || true
 			if [[ ${VERSION_ID} -lt 32 ]]; then
 				dnf remove -y --noautoremove wireguard-dkms
 				dnf copr disable -y jdoss/wireguard
 			fi
 		elif [[ ${OS} == 'centos' ]] || [[ ${OS} == 'almalinux' ]] || [[ ${OS} == 'rocky' ]]; then
-			yum remove -y --noautoremove wireguard-tools
+			yum remove -y --noautoremove wireguard-tools amneziawg-tools amneziawg-dkms || true
+			dnf remove -y --noautoremove wireguard-tools amneziawg-tools amneziawg-dkms || true
+			rm -f /usr/local/bin/amneziawg-go || true
 			if [[ ${VERSION_ID} == 8* ]]; then
 				yum remove --noautoremove kmod-wireguard qrencode
 			fi
 		elif [[ ${OS} == 'oracle' ]]; then
-			yum remove --noautoremove wireguard-tools qrencode
+			yum remove --noautoremove wireguard-tools qrencode amneziawg-tools amneziawg-dkms || true
+			dnf remove -y --noautoremove wireguard-tools qrencode amneziawg-tools amneziawg-dkms || true
+			rm -f /usr/local/bin/amneziawg-go || true
 		elif [[ ${OS} == 'arch' ]]; then
-			pacman -Rs --noconfirm wireguard-tools qrencode
+			pacman -Rs --noconfirm wireguard-tools qrencode amneziawg-tools amneziawg-dkms || true
+			rm -f /usr/local/bin/amneziawg-go || true
 		elif [[ ${OS} == 'alpine' ]]; then
 			(cd qrencode-4.1.1 || exit && make uninstall)
 			rm -rf qrencode-* || exit
-			apk del wireguard-tools libqrencode libqrencode-tools
+			apk del wireguard-tools libqrencode libqrencode-tools amneziawg-tools || true
+			rm -f /usr/local/bin/amneziawg-go || true
 		fi
+
+		# Remove AmneziaWG config dir/link
+		rm -rf /etc/amnezia/amneziawg || true
+		rmdir /etc/amnezia 2>/dev/null || true
 
 		rm -rf /etc/wireguard
 		rm -f /etc/sysctl.d/wg.conf
