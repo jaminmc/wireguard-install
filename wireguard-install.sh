@@ -718,9 +718,12 @@ function installWireGuard() {
 		fi
 	fi
 
+	# Re-select tooling now that packages are installed
+	selectWgImplementation
+
 	# Verify installation (either wg or awg must exist)
 	if ! command -v "${WG_CMD}" &>/dev/null; then
-		echo -e "${RED}Installation failed. The '${WG_CMD}' command was not found.${NC}"
+		echo -e "${RED}Installation failed. Neither 'awg' nor 'wg' was found.${NC}"
 		echo "Please check the installation output above for errors."
 		exit 1
 	fi
@@ -730,9 +733,6 @@ function installWireGuard() {
 	ensureAmneziaPaths
 
 	chmod 600 -R /etc/wireguard/
-
-	# Ensure tooling/env is consistent for subsequent operations
-	selectWgImplementation
 
 	SERVER_PRIV_KEY=$("${WG_CMD}" genkey)
 	SERVER_PUB_KEY=$(echo "${SERVER_PRIV_KEY}" | "${WG_CMD}" pubkey)
