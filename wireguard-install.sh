@@ -847,8 +847,8 @@ ${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 			fi
 			"${WG_QUICK_CMD}" up "${SERVER_WG_NIC}"
 		else
-			systemctl start "wg-quick@${SERVER_WG_NIC}"
-			systemctl enable "wg-quick@${SERVER_WG_NIC}"
+			systemctl start "${WG_QUICK_CMD}@${SERVER_WG_NIC}"
+			systemctl enable "${WG_QUICK_CMD}@${SERVER_WG_NIC}"
 		fi
 	fi
 
@@ -859,7 +859,7 @@ ${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	if [[ ${OS} == 'alpine' ]]; then
 		rc-service --quiet "wg-quick.${SERVER_WG_NIC}" status
 	else
-		systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}"
+		systemctl is-active --quiet "${WG_QUICK_CMD}@${SERVER_WG_NIC}"
 	fi
 	WG_RUNNING=$?
 
@@ -869,7 +869,7 @@ ${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 		if [[ ${OS} == 'alpine' ]]; then
 			echo -e "${ORANGE}You can check if WireGuard is running with: rc-service wg-quick.${SERVER_WG_NIC} status${NC}"
 		else
-			echo -e "${ORANGE}You can check if WireGuard is running with: systemctl status wg-quick@${SERVER_WG_NIC}${NC}"
+			echo -e "${ORANGE}You can check if WireGuard is running with: systemctl status ${WG_QUICK_CMD}@${SERVER_WG_NIC}${NC}"
 		fi
 		echo -e "${ORANGE}If you get something like \"Cannot find device ${SERVER_WG_NIC}\", please reboot!${NC}"
 	else # WireGuard is running
@@ -877,7 +877,7 @@ ${FIREWALLD_RULES_DOWN}" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 		if [[ ${OS} == 'alpine' ]]; then
 			echo -e "${GREEN}You can check the status of WireGuard with: rc-service wg-quick.${SERVER_WG_NIC} status\n\n${NC}"
 		else
-			echo -e "${GREEN}You can check the status of WireGuard with: systemctl status wg-quick@${SERVER_WG_NIC}\n\n${NC}"
+			echo -e "${GREEN}You can check the status of WireGuard with: systemctl status ${WG_QUICK_CMD}@${SERVER_WG_NIC}\n\n${NC}"
 		fi
 		echo -e "${ORANGE}If you don't have internet connectivity from your client, try to reboot the server.${NC}"
 	fi
@@ -1141,8 +1141,8 @@ function uninstallWg() {
 			unlink "/etc/init.d/wg-quick.${SERVER_WG_NIC}"
 			rc-update del sysctl
 		else
-			systemctl stop "wg-quick@${SERVER_WG_NIC}"
-			systemctl disable "wg-quick@${SERVER_WG_NIC}"
+			systemctl stop "${WG_QUICK_CMD}@${SERVER_WG_NIC}"
+			systemctl disable "${WG_QUICK_CMD}@${SERVER_WG_NIC}"
 		fi
 
 		if [[ ${OS} == 'ubuntu' ]] || [[ ${OS} == 'debian' ]]; then
@@ -1191,7 +1191,7 @@ function uninstallWg() {
 			sysctl --system
 
 			# Check if WireGuard is running
-			systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}"
+			systemctl is-active --quiet "${WG_QUICK_CMD}@${SERVER_WG_NIC}"
 		fi
 		WG_RUNNING=$?
 
