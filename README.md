@@ -28,6 +28,8 @@ Supported distributions:
 - Rocky Linux >= 8
 - Ubuntu >= 18.04
 
+**Testing status:** while the script includes logic for all distributions listed above, it is **only tested on Debian at the moment**.
+
 ## Usage
 
 Download and execute the script. Answer the questions asked by the script and it will take care of the rest.
@@ -38,10 +40,26 @@ chmod +x wireguard-install.sh
 ./wireguard-install.sh
 ```
 
-It will install and configure:
+### Backend selection (WireGuard vs AmneziaWG)
 
-- On **VMs / bare metal**: **AmneziaWG DKMS + tools** (when available for your distro).
-- In **containers**: **userspace `amneziawg-go`** plus tooling (kernel modules are often unavailable in containers).
+On first install, the script prompts you to choose a backend:
+
+- **WireGuard (upstream)**: standard WireGuard tooling and configuration
+- **AmneziaWG**: WireGuard-compatible, with optional AmneziaWG-specific obfuscation fields in generated client configs
+
+After install, rerunning the script brings up a management menu which includes an option to **switch backends** later.
+
+### What gets installed
+
+Depending on the backend choice and your environment, it will install and configure:
+
+- **WireGuard backend**
+  - Defaults to **kernel WireGuard** when available
+  - If kernel WireGuard is unavailable (common in containers), or if you explicitly choose userspace, it uses **userspace `wireguard-go`** via `wg-quick`
+  - Installs `wireguard-tools` (and `wireguard-go` when needed)
+- **AmneziaWG backend**
+  - On **VMs / bare metal**: best-effort install of **AmneziaWG DKMS + tools** (when available for your distro)
+  - In **containers**: **userspace `amneziawg-go`** plus tooling (kernel modules are often unavailable in containers)
 
 It then configures the server, enables routing/firewall rules for the detected IP stack, and generates client configuration files.
 
@@ -55,6 +73,16 @@ For each client, the script generates **two files**:
 - An **AmneziaWG-enhanced** client config (includes AmneziaWG obfuscation parameters)
 
 If `qrencode` is installed, it prints QR codes for both.
+
+### NAT / CGNAT / public endpoint detection
+
+The installer tries to pre-fill a reasonable **endpoint address** for clients:
+
+- If the detected IPv4 address is a **private LAN address** (RFC1918), the installer attempts to detect your **external/public IPv4** online and uses it as the default endpoint.
+  - In that case, you typically need to **port-forward UDP** on your router/NAT:
+    - **WAN UDP port**: the chosen WireGuard port
+    - **LAN destination**: your server’s private IP on the same UDP port
+- If the detected IPv4 address is **CGNAT** (`100.64.0.0/10`) and a global **IPv6** is available, the installer defaults the endpoint to **IPv6** (because inbound port-forwarding usually isn’t possible with CGNAT).
 
 ### DNS
 
