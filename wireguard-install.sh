@@ -457,6 +457,11 @@ function isValidIP() {
 	isValidIPv4 "${IP}" || isValidIPv6 "${IP}"
 }
 
+function isValidMTU() {
+	local MTU=$1
+	[[ ${MTU} =~ ^[0-9]+$ ]] && [[ ${MTU} -ge 576 ]] && [[ ${MTU} -le 9000 ]]
+}
+
 function getHostDNSResolvers() {
 	# Returns up to two DNS resolvers (space-separated), if detected.
 	# Handles systemd-resolved stub (/etc/resolv.conf -> 127.0.0.53) by reading the "real" file.
@@ -696,6 +701,31 @@ function installQuestions() {
 	else
 		# AmneziaWG: in containers we will likely need userspace; handled later.
 		WG_USE_USERSPACE=0
+	fi
+
+	# MTU selection: IPv6 requires link MTU >= 1280.
+	# If MTU is too small, IPv6 will not work reliably (and obfuscation can increase effective overhead).
+	# Default MTU:
+	# - 1420 is common for WG over IPv4 on 1500-MTU paths
+	# - 1400 is a safer default when CLAT/464XLAT is present (often implies IPv6 transport or constrained PMTU)
+	if [[ ${CLAT_PRESENT} -eq 1 ]]; then
+		WG_MTU_DEFAULT=${WG_MTU_DEFAULT:-1400}
+	else
+		WG_MTU_DEFAULT=${WG_MTU_DEFAULT:-1420}
+	fi
+	if [[ ${IPV6_AVAILABLE} -eq 1 ]]; then
+		until isValidMTU "${WG_MTU}" && [[ ${WG_MTU} -ge 1280 ]]; do
+			read -rp "WireGuard MTU (must be >= 1280 for IPv6) [${WG_MTU_DEFAULT}]: " -e WG_MTU
+			WG_MTU=${WG_MTU:-${WG_MTU_DEFAULT}}
+			if isValidMTU "${WG_MTU}" && [[ ${WG_MTU} -lt 1280 ]]; then
+				echo -e "${ORANGE}MTU ${WG_MTU} is too small for IPv6. Please choose 1280 or higher.${NC}"
+			fi
+		done
+	else
+		until isValidMTU "${WG_MTU}"; do
+			read -rp "WireGuard MTU [${WG_MTU_DEFAULT}]: " -e WG_MTU
+			WG_MTU=${WG_MTU:-${WG_MTU_DEFAULT}}
+		done
 	fi
 
 	# DNS selection (host DNS, curated public DNS, or custom). Supports IPv4 and IPv6.
@@ -1065,6 +1095,7 @@ function installWireGuard() {
 	{
 		printf 'WG_BACKEND=%q\n' "${WG_BACKEND}"
 		printf 'WG_USE_USERSPACE=%q\n' "${WG_USE_USERSPACE:-0}"
+		printf 'WG_MTU=%q\n' "${WG_MTU:-1420}"
 		printf 'SERVER_PUB_IP=%q\n' "${SERVER_PUB_IP}"
 		printf 'SERVER_PUB_NIC=%q\n' "${SERVER_PUB_NIC}"
 		printf 'SERVER_PUB_NIC4=%q\n' "${SERVER_PUB_NIC4}"
@@ -1096,6 +1127,9 @@ function installWireGuard() {
 	# Add server interface
 	{
 		echo "[Interface]"
+		if [[ -n ${WG_MTU} ]]; then
+			echo "MTU = ${WG_MTU}"
+		fi
 		if [[ -n ${SERVER_WG_IPV4} ]]; then
 			echo "Address = ${SERVER_WG_IPV4}/24"
 		fi
@@ -1313,6 +1347,9 @@ function newClient() {
 	{
 		echo "[Interface]"
 		echo "PrivateKey = ${CLIENT_PRIV_KEY}"
+		if [[ -n ${WG_MTU} ]]; then
+			echo "MTU = ${WG_MTU}"
+		fi
 		if [[ -n ${CLIENT_WG_IPV4} ]]; then
 			echo "Address = ${CLIENT_WG_IPV4}/32"
 		fi
@@ -1320,12 +1357,6 @@ function newClient() {
 			echo "Address = ${CLIENT_WG_IPV6}/128"
 		fi
 		echo "DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}"
-
-		echo ""
-		echo "# Uncomment the next line to set a custom MTU"
-		echo "# This might impact performance, so use it only if you know what you are doing"
-		echo "# See https://github.com/nitred/nr-wg-mtu-finder to find your optimal MTU"
-		echo "# MTU = 1420"
 
 		echo ""
 		echo "[Peer]"
@@ -1339,6 +1370,9 @@ function newClient() {
 	{
 		echo "[Interface]"
 		echo "PrivateKey = ${CLIENT_PRIV_KEY}"
+		if [[ -n ${WG_MTU} ]]; then
+			echo "MTU = ${WG_MTU}"
+		fi
 		if [[ -n ${CLIENT_WG_IPV4} ]]; then
 			echo "Address = ${CLIENT_WG_IPV4}/32"
 		fi
@@ -1354,12 +1388,6 @@ function newClient() {
 		if [[ -n ${AWG_I3} ]]; then echo "I3 = ${AWG_I3}"; fi
 		if [[ -n ${AWG_I4} ]]; then echo "I4 = ${AWG_I4}"; fi
 		if [[ -n ${AWG_I5} ]]; then echo "I5 = ${AWG_I5}"; fi
-
-		echo ""
-		echo "# Uncomment the next line to set a custom MTU"
-		echo "# This might impact performance, so use it only if you know what you are doing"
-		echo "# See https://github.com/nitred/nr-wg-mtu-finder to find your optimal MTU"
-		echo "# MTU = 1420"
 
 		echo ""
 		echo "[Peer]"
@@ -1615,14 +1643,23 @@ function switchBackend() {
 	# Remove packages/binaries from the non-selected backend.
 	pruneOtherBackendPackages
 
+	# Ensure AmneziaWG config path symlink is correct when switching to AmneziaWG.
+	if [[ ${WG_BACKEND} == "amneziawg" ]]; then
+		# Desired state:
+		# - /etc/wireguard exists (real directory)
+		# - /etc/amnezia/amneziawg -> /etc/wireguard (symlink)
+		ensureAmneziaPaths
+	fi
+
 	# Persist.
 	if [[ -e /etc/wireguard/params ]]; then
 		# shellcheck disable=SC2016
-		sed -i '/^WG_BACKEND=/d;/^WG_USE_USERSPACE=/d' /etc/wireguard/params
+		sed -i '/^WG_BACKEND=/d;/^WG_USE_USERSPACE=/d;/^WG_MTU=/d' /etc/wireguard/params
 	fi
 	{
 		printf 'WG_BACKEND=%q\n' "${WG_BACKEND}"
 		printf 'WG_USE_USERSPACE=%q\n' "${WG_USE_USERSPACE:-0}"
+		printf 'WG_MTU=%q\n' "${WG_MTU:-1420}"
 	} >>/etc/wireguard/params
 
 	# Reload and restart.

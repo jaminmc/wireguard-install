@@ -74,6 +74,15 @@ For each client, the script generates **two files**:
 
 If `qrencode` is installed, it prints QR codes for both.
 
+### MTU (IPv6 reliability)
+
+If IPv6 is enabled, the installer ensures the configured MTU is **>= 1280** (otherwise IPv6 can break).
+
+- Defaults to **1400** when 464XLAT/CLAT is detected
+- Otherwise defaults to **1420**
+
+The selected MTU is written into both the **server config** and generated **client configs** to avoid `wg-quick`/`awg-quick` auto-selecting an MTU that is too small for IPv6.
+
 ### NAT / CGNAT / public endpoint detection
 
 The installer tries to pre-fill a reasonable **endpoint address** for clients:
